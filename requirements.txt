@@ -1,0 +1,21 @@
+# Core dependencies
+python-dotenv==1.2.1
+
+# LangChain ecosystem
+langchain==1.0.5
+langchain-core==1.0.4
+langchain-openai==1.0.2
+langgraph==1.0.2
+langgraph-checkpoint==3.0.1
+langgraph-prebuilt==1.0.2
+
+# Elasticsearch
+elasticsearch==9.2.0
+
+# Embeddings and ML
+sentence-transformers==5.1.0
+torch==2.8.0
+transformers==4.56.1
+
+# Note: All other dependencies (numpy, pandas, httpx, etc.) 
+# will be automatically installed as sub-dependencies of the above packages
