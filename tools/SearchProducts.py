@@ -141,6 +141,7 @@ def search_products_semantic(query: str) -> str:
         
     Returns:
         A formatted string with the search results including product details and relevance scores.
+        It should show all details of each product including product ID, name, brand, price, discount, category, and similarity score .
         Results are automatically reranked by the AI agent based on semantic relevance to the query.
         It should be 5 results.
     """
