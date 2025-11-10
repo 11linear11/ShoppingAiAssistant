@@ -8,21 +8,41 @@ A conversational AI shopping assistant that uses **LangGraph**, **Elasticsearch*
 - **Elasticsearch Integration**: Fast and scalable vector search capabilities
 - **Conversational AI**: LangGraph-based agent with conversation memory
 - **Tool Integration**: Automatically decides when to search for products based on user intent
+- **JSON Output**: Returns product results in structured JSON format
 - **Multilingual Support**: Works with English, Persian, and other languages
 
 ## Architecture 🏗️
 
 ```
-User Query → LangGraph Agent → LLM (GPT-4o) → Tool Selection → Elasticsearch Search
-                ↓                                                         ↓
-         Conversation Memory ← Response Generation ← Semantic Embedding
+User Query → LangGraph Agent → LLM → Tool Selection → Elasticsearch Search
+                ↓                                              ↓
+         Conversation Memory ← JSON Response ← Semantic Embedding
 ```
 
-## Prerequisites 📋
+## Project Structure 📁
 
-1. **Python 3.8+**
-2. **Elasticsearch** running on `localhost:9200` (or configure your own)
-3. **API Keys** configured in `.env` file
+```
+ShoppingAiAssistant/
+├── src/                    # Source code
+│   ├── agent.py           # LangGraph agent implementation
+│   ├── tools/             # Tools package
+│   │   ├── SearchProducts.py  # Elasticsearch search tool
+│   │   └── __init__.py
+│   └── __init__.py
+├── tests/                  # Test files
+│   └── test_json_output.py
+├── examples/               # Usage examples
+│   ├── basic_usage.py
+│   └── README.md
+├── config/                 # Configuration files
+│   └── .env.example       # Environment variables template
+├── script/                 # Utility scripts
+├── main.py                # Main entry point
+├── requirements.txt       # Python dependencies
+├── .env                   # Environment variables (create from .env.example)
+├── .gitignore
+└── README.md
+```
 
 ## Installation 🚀
 
@@ -43,200 +63,177 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-4. **Setup Elasticsearch**:
+4. **Configure environment variables**:
 ```bash
-# Using Docker (easiest way)
-docker run -d \
-  --name elasticsearch \
-  -p 9200:9200 \
-  -e "discovery.type=single-node" \
-  -e "xpack.security.enabled=false" \
-  elasticsearch:8.11.0
+cp config/.env.example .env
+# Edit .env and add your API keys
 ```
 
-5. **Configure environment variables**:
-Create a `.env` file with:
-```env
-# LLM API Configuration
-OPENAI_API_KEY=your_openai_api_key_here
-MODEL_NAME=gpt-4o
+## Configuration ⚙️
 
-# Elasticsearch Configuration
-ELASTICSEARCH_HOST=localhost
-ELASTICSEARCH_PORT=9200
+Edit `.env` file with your credentials:
+
+```env
+# NVIDIA AI Endpoints
+api_key=your_nvidia_api_key_here
+BASE_URL=https://integrate.api.nvidia.com/v1
+MODEL_NAME=openai/gpt-oss-120b
+
+# Elasticsearch
+ELASTICSEARCH_HOST=your_elasticsearch_host
+ELASTICSEARCH_PORT=9201
 ELASTICSEARCH_USER=elastic
-ELASTICSEARCH_PASSWORD=
-ELASTICSEARCH_INDEX=products
+ELASTICSEARCH_PASSWORD=your_password
+ELASTICSEARCH_INDEX=shopping_products
+ELASTICSEARCH_SCHEME=http
 ```
 
 ## Usage 💻
 
-### 1. Index Sample Products
+### Basic Usage
 
-First, run the search module to index sample products:
-
-```bash
-python SearchProducts.py
-```
-
-This will:
-- Create the Elasticsearch index with proper mappings
-- Generate embeddings using `intfloat/multilingual-e5-base`
-- Index sample products
-- Run test searches
-
-### 2. Run the Agent
+Run the interactive CLI:
 
 ```bash
-python agent.py
+python main.py
 ```
 
-### 3. Use in Your Code
+Example conversation:
+```
+User: سلام
+Assistant: {"message": "سلام! چطور می‌تونم کمکتون کنم؟"}
+
+User: دوغ آبعلی میخوام
+Assistant: {"products": [...]}
+```
+
+### Python API
 
 ```python
-from agent import create_agent
+from src.agent import create_agent
 from langchain_core.messages import HumanMessage
 
 # Create agent
 graph = create_agent()
+config = {"configurable": {"thread_id": "session_1"}}
 
-# Configure session
-config = {"configurable": {"thread_id": "user_123"}}
-
-# Chat with agent
+# Send message
 state = graph.invoke(
-    {"messages": [HumanMessage(content="Find me a gaming laptop")]},
+    {"messages": [HumanMessage(content="دوغ پیدا کن برام")]},
     config=config
 )
 
+# Get response
 print(state['messages'][-1].content)
 ```
 
-## Example Queries 🗣️
+### Run Tests
 
-The agent understands natural language in multiple languages:
-
-**English:**
-- "Show me gaming laptops"
-- "I need a cheap phone"
-- "Find wireless headphones"
-
-**Persian/Farsi:**
-- "لپ تاپ گیمینگ نشون بده"
-- "یک گوشی ارزون میخوام"
-- "هدفون بی سیم پیدا کن"
-
-## Project Structure 📁
-
-```
-ShoppingAiAssistant/
-├── agent.py                 # Main LangGraph agent
-├── SearchProducts.py        # Elasticsearch + Embedding search tool
-├── main.py                  # Entry point (if needed)
-├── .env                     # Environment configuration
-├── README.md               # This file
-├── dataset/
-│   └── export-product-list.csv  # Product data
-└── script/
-    └── shopping_embedding_colab.ipynb  # Jupyter notebook for embeddings
-```
-
-## How It Works 🔍
-
-1. **User Query**: User asks a question in natural language
-2. **Intent Detection**: LLM (GPT-4o) decides if a product search is needed
-3. **Tool Invocation**: If needed, calls `search_products_semantic` tool
-4. **Query Embedding**: Converts query to 768-dim vector using multilingual model
-5. **Vector Search**: Elasticsearch performs KNN search on product embeddings
-6. **Results Ranking**: Returns top-k most relevant products with scores
-7. **Response Generation**: LLM formats results into natural conversation
-
-## Customization ⚙️
-
-### Add Your Own Products
-
-Edit `SearchProducts.py` and modify the `index_sample_products()` function:
-
-```python
-products = [
-    {
-        "product_id": "YOUR_ID",
-        "name": "Product Name",
-        "description": "Detailed description",
-        "price": 99.99,
-        "category": "Category"
-    },
-    # Add more products...
-]
-```
-
-### Change Embedding Model
-
-In `SearchProducts.py`, modify the model name:
-
-```python
-model_name = "your-preferred-model"  # e.g., "sentence-transformers/all-MiniLM-L6-v2"
-```
-
-### Adjust Search Parameters
-
-```python
-results = engine.search(
-    query="your query",
-    top_k=10,        # Number of results
-    min_score=0.3    # Minimum similarity threshold (0-1)
-)
-```
-
-## Troubleshooting 🔧
-
-### Elasticsearch Connection Error
 ```bash
-# Check if Elasticsearch is running
-curl http://localhost:9200
+# Test JSON output
+python tests/test_json_output.py
 
-# If not, start it:
-docker start elasticsearch
+# Basic usage example
+python examples/basic_usage.py
 ```
 
-### Model Download Issues
-The first run will download the embedding model (~500MB). Ensure you have:
-- Stable internet connection
-- At least 2GB free disk space
+## JSON Response Format 📋
 
-### Memory Issues
-If you encounter memory errors:
-- Use a smaller embedding model
-- Reduce batch size in embeddings
-- Increase Docker/system memory allocation
+### Product Search Response
+```json
+{
+  "products": [
+    {
+      "name": "دوغ گازدار آبعلی ۲۶۰ میلی لیتری",
+      "price": 27500,
+      "brand": "آبعلی",
+      "discount": 15,
+      "product_id": "3546253",
+      "similarity": 0.872,
+      "category": "لبنیات"
+    }
+  ]
+}
+```
 
-## Dependencies 📦
+### Chat Response
+```json
+{
+  "message": "سلام! چطور می‌تونم کمکتون کنم؟"
+}
+```
 
-Main packages:
-- `langchain` - LLM framework
-- `langgraph` - Graph-based agent orchestration
-- `elasticsearch` - Search engine client
-- `sentence-transformers` - Embedding models
-- `python-dotenv` - Environment management
+## Tech Stack 🛠️
+
+- **LangChain & LangGraph**: Agent orchestration and conversation flow
+- **NVIDIA AI Endpoints**: LLM inference (gpt-oss-120b)
+- **Elasticsearch 9.2.0**: Vector search and product indexing
+- **Sentence Transformers**: Multilingual embeddings (intfloat/multilingual-e5-base)
+- **Python 3.13**: Runtime environment
+
+## Key Components 🔑
+
+### Agent (src/agent.py)
+- LangGraph-based conversational agent
+- Automatic tool calling
+- JSON response node for direct output
+- Memory persistence with MemorySaver
+
+### Search Tool (src/tools/SearchProducts.py)
+- Elasticsearch semantic search
+- Cosine similarity scoring
+- Multilingual support
+- JSON formatted output
+
+## Development 🔧
+
+### Adding New Tools
+
+1. Create tool in `src/tools/`
+2. Decorate with `@tool`
+3. Import in `src/agent.py`
+4. Add to tools list
+
+### Cleaning Up
+
+```bash
+# Remove cache files
+find . -type d -name __pycache__ -exec rm -rf {} +
+find . -type f -name "*.pyc" -delete
+
+# Remove backup files
+rm -f *_old.py *.backup
+```
+
+## Troubleshooting 🐛
+
+### Import Errors
+Make sure you're running from the project root:
+```bash
+cd ShoppingAiAssistant
+python main.py
+```
+
+### Elasticsearch Connection
+Check your Elasticsearch credentials in `.env` file.
+
+### Token Limit Issues
+The agent uses a `json_response` node to bypass LLM token limits for product results.
 
 ## Contributing 🤝
 
-Contributions are welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push to the branch
-5. Open a Pull Request
+Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License 📄
 
-MIT License - feel free to use this project for any purpose.
+This project is licensed under the MIT License.
 
-## Contact 📧
+## Author ✍️
 
-- GitHub: [@11linear11](https://github.com/11linear11)
-- Project: [ShoppingAiAssistant](https://github.com/11linear11/ShoppingAiAssistant)
+11linear11
 
----
+## Acknowledgments 🙏
 
-Made with ❤️ using LangGraph, Elasticsearch, and Multilingual AI
+- LangChain team for the amazing framework
+- Elasticsearch for powerful search capabilities
+- HuggingFace for multilingual embeddings

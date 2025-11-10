@@ -4,6 +4,7 @@ This module provides semantic search functionality for products.
 """
 
 import os
+import json
 from typing import List, Dict
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
@@ -141,8 +142,8 @@ def search_products_semantic(query: str) -> str:
         
     Returns:
         A formatted string with the search results including product details and relevance scores.
-        It should show all details of each product including product ID, name, brand, price, discount, category, and similarity score .
         Results are automatically reranked by the AI agent based on semantic relevance to the query.
+        It should show all details of each product including product ID, name, brand, price, discount, category, and similarity score .        
         It should be 5 results.
     """
     try:
@@ -153,30 +154,29 @@ def search_products_semantic(query: str) -> str:
         results = engine.search(query, top_k=5, min_similarity=0.3)
 
         if not results:
-            return f"متاسفانه هیچ محصولی با جستجوی '{query}' پیدا نشد."
+            return json.dumps({
+                "products": [],
+                "message": f"متاسفانه هیچ محصولی با جستجوی '{query}' پیدا نشد."
+            }, ensure_ascii=False)
         
-        # Format results professionally
-        output = f"یافت شد {len(results)} محصول مرتبط با '{query}':\n\n"
+        # Format results as JSON
+        products = []
+        for product in results:
+            products.append({
+                "name": product['product_name'],
+                "price": int(product['price']),
+                "brand": product['brand_name'] if product['brand_name'] else "",
+                "discount": int(product['discount_percentage']) if product['has_discount'] else 0,
+                "product_id": str(product['product_id']),
+                "similarity": round(product['similarity'], 3),
+                "category": product['category_name'] if product['category_name'] else ""
+            })
         
-        for i, product in enumerate(results, 1):
-            output += f"{i}. {product['product_name']}\n"
-            
-            if product['brand_name']:
-                output += f"   برند: {product['brand_name']}\n"
-            
-            if product['has_discount']:
-                output += f"   قیمت: {product['price']:,.0f} تومان (با تخفیف: {product['discount_price']:,.0f} تومان - {product['discount_percentage']:.0f}% تخفیف)\n"
-            else:
-                output += f"   قیمت: {product['price']:,.0f} تومان\n"
-            
-            if product['category_name']:
-                output += f"   دسته‌بندی: {product['category_name']}\n"
-            
-            output += f"   میزان تطابق: {product['similarity']*100:.1f}%\n"
-            output += f"   کد محصول: {product['product_id']}\n\n"
-        
-        return output.strip()
+        return json.dumps({"products": products}, ensure_ascii=False)
         
     except Exception as e:
-        return f"خطا در جستجوی محصولات. لطفاً دوباره تلاش کنید."
+        return json.dumps({
+            "products": [],
+            "error": "خطا در جستجوی محصولات. لطفاً دوباره تلاش کنید."
+        }, ensure_ascii=False)
 
