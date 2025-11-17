@@ -76,12 +76,10 @@ Edit `.env` file with your credentials:
 ```env
 # NVIDIA AI Endpoints
 api_key=your_nvidia_api_key_here
-BASE_URL=https://integrate.api.nvidia.com/v1
-MODEL_NAME=openai/gpt-oss-120b
 
 # Elasticsearch
 ELASTICSEARCH_HOST=your_elasticsearch_host
-ELASTICSEARCH_PORT=9201
+ELASTICSEARCH_PORT=9200
 ELASTICSEARCH_USER=elastic
 ELASTICSEARCH_PASSWORD=your_password
 ELASTICSEARCH_INDEX=shopping_products
