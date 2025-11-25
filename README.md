@@ -1,546 +1,248 @@
-# Shopping AI Assistant 🛍️# Shopping AI Assistant 🛍️# Shopping AI Assistant 🛍️
+# Shopping AI Assistant - Quick Start Guide
 
+> **For complete documentation, see [DOCUMENTATION.md](DOCUMENTATION.md)**
 
+## 🚀 Quick Start (5 minutes)
 
-An intelligent shopping assistant powered by LangGraph, Elasticsearch, and multilingual semantic search to help users find products naturally.
+### 1. Install Dependencies
+```bash
+pip install -r requirements.txt
+```
 
+### 2. Configure Environment
+```bash
+cp config/.env.example .env
+# Edit .env with your credentials:
+# - api_key (NVIDIA)
+# - ELASTICSEARCH_HOST
+# - ELASTICSEARCH_PASSWORD
+```
 
+### 3. Run
+```bash
+python main.py
+```
 
-## Featuresیک دستیار هوشمند خرید که با استفاده از LangGraph، Elasticsearch و جستجوی معنایی چندزبانه به کاربران کمک می‌کند محصولات را به صورت طبیعی پیدا کنند.A conversational AI shopping assistant that uses **LangGraph**, **Elasticsearch**, and **multilingual semantic search** to help users find products naturally.
+### 4. Try It
+```
+User: یه هدفون ارزان میخوام
+```
 
+---
 
+## 📚 Key Concepts
 
-- Semantic search using `intfloat/multilingual-e5-base` model
+### System Architecture
+```
+User Query → LangGraph Agent → interpret_query → search_products_semantic → Elasticsearch → Results
+```
 
-- Hybrid search (BM25 + Embedding)
+### Two Main Tools
 
-- Smart ranking based on quality, price, and relevance## ویژگی‌ها## Features ✨
+1. **interpret_query**: Understands user intent
+   - Input: `"یه هدفون ارزان میخوام"`
+   - Output: `{category, intent, sensitivities, suggested_query}`
 
-- Intelligent user intent analysis
+2. **search_products_semantic**: Finds products
+   - Uses hybrid search (BM25 + Vector)
+   - Ranks by value_score
+   - Returns top 1-5 products
 
-- Persian/Farsi language support
+### Five Shopping Intents
 
+| Intent | User Wants | Example |
+|--------|------------|---------|
+| `find_cheapest` | Lowest price | "ارزان‌ترین گوشی" |
+| `find_high_quality` | Best quality | "بهترین لپ تاپ" |
+| `find_best_value` | Best price/quality | "گوشی با ارزش خوب" |
+| `compare` | Multiple options | "چند تا گوشی نشون بده" |
+| `find_by_feature` | Specific feature | "هدفون نرم" |
 
+---
 
-## Project Structure- جستجوی معنایی با مدل `intfloat/multilingual-e5-base`- **Semantic Search**: Uses `intfloat/multilingual-e5-base` model for understanding queries in multiple languages (including Persian/Farsi)
+## 🔧 Configuration
 
+### Required Environment Variables
+```bash
+api_key=nvapi-xxxxx              # NVIDIA AI API key
+ELASTICSEARCH_HOST=your_host     # ES host address
+ELASTICSEARCH_PASSWORD=your_pass # ES password
+```
 
+### Optional Variables
+```bash
+DEBUG_MODE=false                 # Enable detailed logging
+ELASTICSEARCH_PORT=9200          # ES port
+ELASTICSEARCH_INDEX=shopping_products
+MODEL_NAME=openai/gpt-oss-120b  # LLM model
+```
 
-```- جستجوی ترکیبی (BM25 + Embedding)- **Hybrid Search**: Combines BM25 text matching with semantic embedding search
+---
 
+## 💡 Example Queries
+
+### Price-Focused
+```
+User: ارزان‌ترین گوشی رو نشون بده
+→ Results sorted by lowest price
+```
+
+### Quality-Focused
+```
+User: بهترین هدفون با کیفیت عالی
+→ Results sorted by brand score
+```
+
+### Feature-Specific
+```
+User: یه شامپوی نرم کننده میخوام
+→ Results match "نرم کننده" feature
+```
+
+### Implicit Need
+```
+User: سردمه
+→ Suggests: کاپشن (jacket)
+```
+
+```
+User: گشنمه
+→ Suggests: بیسکویت (biscuit)
+```
+
+---
+
+## 🐛 Troubleshooting
+
+### No Results?
+1. Check Elasticsearch connection
+2. Verify index exists: `GET /shopping_products/_count`
+3. Enable debug mode: `DEBUG_MODE=true`
+
+### Slow Performance?
+1. First run is slow (model loading ~3s) - normal
+2. Subsequent queries should be <400ms
+3. Check Elasticsearch performance
+
+### LLM Errors?
+1. Verify API key is valid
+2. Try different model: `MODEL_NAME=meta/llama-3.1-70b-instruct`
+3. Check internet connection
+
+---
+
+## 📊 Tech Stack
+
+- **LangGraph 1.0.2**: Conversation orchestration
+- **Elasticsearch 9.2.0**: Vector search
+- **multilingual-e5-base**: Semantic embeddings (768-dim)
+- **NVIDIA LLama 3.1 70B**: LLM
+
+---
+
+## 📁 Project Structure
+
+```
 ShoppingAiAssistant/
-
-├── src/- رتبه‌بندی هوشمند بر اساس کیفیت، قیمت و ارتباط- **Intelligent Reranking**: Products ranked by value_score (quality + price + relevance)
-
-│   ├── agent.py              # LangGraph Agent implementation
-
-│   └── tools/- تحلیل هوشمند نیت کاربر- **Query Intent Analysis**: Automatic understanding of user shopping preferences
-
-│       └── SearchProducts.py # Elasticsearch search tool
-
-├── config/- پشتیبانی از زبان فارسی- **Dynamic Filtering**: Adaptive similarity thresholds based on result quality
-
-│   └── .env.example          # Environment variables template
-
-├── main.py                   # Entry point- **Elasticsearch Integration**: Fast and scalable vector search capabilities
-
-├── requirements.txt          # Dependencies
-
-├── BrandScore.json           # Brand scores## ساختار پروژه- **Conversational AI**: LangGraph-based agent with conversation memory
-
-└── CategoryW.json            # Category weights
-
-```- **Tool Integration**: Automatically decides when to search for products based on user intent
-
-
-
-## Installation```- **JSON Output**: Returns product results in structured JSON format
-
-
-
-1. Clone the repository:ShoppingAiAssistant/- **Multilingual Support**: Works with English, Persian, and other languages
-
-```bash
-
-git clone https://github.com/11linear11/ShoppingAiAssistant.git├── src/
-
-cd ShoppingAiAssistant
-
-```│   ├── agent.py              # پیاده‌سازی Agent با LangGraph## Architecture 🏗️
-
-
-
-2. Create virtual environment:│   └── tools/
-
-```bash
-
-python -m venv venv│       └── SearchProducts.py # ابزار جستجو در Elasticsearch```
-
-source venv/bin/activate
-
-```├── config/User Query → LangGraph Agent → interpret_query (analyze intent)
-
-
-
-3. Install dependencies:│   └── .env.example          # نمونه تنظیمات                ↓                         ↓
-
-```bash
-
-pip install -r requirements.txt├── main.py                   # نقطه ورود برنامه         System Prompt          extract preferences
-
+├── main.py                    # Entry point
+├── src/
+│   ├── agent.py              # LangGraph agent
+│   └── tools/
+│       └── SearchProducts.py # Search engine
+├── config/
+│   └── .env.example          # Config template
+├── BrandScore.json           # Brand scores
+└── requirements.txt          # Dependencies
 ```
 
-├── requirements.txt          # وابستگی‌ها                ↓                         ↓
-
-4. Configure environment variables:
-
-```bash├── BrandScore.json           # امتیاز برندها    Tool Selection    →  search_products_semantic
-
-cp config/.env.example .env
-
-# Edit .env file with your credentials└── CategoryW.json            # وزن دسته‌بندی‌ها                              (BM25 + Embedding)
-
-```
-
-```                                    ↓
-
-## Configuration
-
-                         Hybrid Search Results
-
-Fill in your `.env` file:
-
-## نصب و راه‌اندازی                                    ↓
-
-```env
-
-DEBUG_MODE=false                         Dynamic Filtering
-
-
-
-# NVIDIA API1. کلون کردن پروژه:                                    ↓
-
-api_key=your_nvidia_api_key
-
-```bash                    Value Score Reranking
-
-# Elasticsearch
-
-ELASTICSEARCH_HOST=your_hostgit clone https://github.com/11linear11/ShoppingAiAssistant.git              (brand_score × quality + similarity - price)
-
-ELASTICSEARCH_PORT=9200
-
-ELASTICSEARCH_USER=elasticcd ShoppingAiAssistant                                    ↓
-
-ELASTICSEARCH_PASSWORD=your_password
-
-ELASTICSEARCH_INDEX=shopping_products```                         JSON Response → User
-
-```
-
-```
-
-## Usage
-
-2. ساخت محیط مجازی:
-
-Run the application:
-
-```bash```bash### Search Flow:
-
-python main.py
-
-```python -m venv venv1. **Intent Analysis**: `interpret_query` extracts category, intent, price_sensitivity, quality_sensitivity
-
-
-
-Example:source venv/bin/activate2. **Hybrid Search**: BM25 (keyword matching) + Semantic (embedding similarity)
-
-```
-
-User: I want cheap headphones```3. **Dynamic Filter**: Median-based threshold removes irrelevant results
-
-Assistant: 
-
-🛒 Bluetooth Headphone XYZ4. **Value Ranking**: Products scored by: `brand_score × quality + 0.4 × similarity - price_sensitivity × final_price`
-
-   💰 Price: 45,000 Toman
-
-   🏷️ Brand: Sony3. نصب وابستگی‌ها:
-
-   🔥 Discount: 15%
-
-``````bash## Project Structure 📁
-
-
-
-## APIpip install -r requirements.txt
-
-
-
-```python``````
-
-from src.agent import create_agent
-
-from langchain_core.messages import HumanMessageShoppingAiAssistant/
-
-
-
-graph = create_agent()4. تنظیم متغیرهای محیطی:├── src/                    # Source code
-
-config = {"configurable": {"thread_id": "session_1"}}
-
-```bash│   ├── agent.py           # LangGraph agent implementation
-
-state = graph.invoke(
-
-    {"messages": [HumanMessage(content="cheap headphones")]},cp config/.env.example .env│   ├── tools/             # Tools package
-
-    config=config
-
-)# فایل .env را ویرایش کنید│   │   ├── SearchProducts.py  # Elasticsearch search tool
-
-print(state['messages'][-1].content)
-
-``````│   │   └── __init__.py
-
-
-
-## Tech Stack│   └── __init__.py
-
-
-
-- LangChain & LangGraph## تنظیمات├── tests/                  # Test files
-
-- NVIDIA AI Endpoints
-
-- Elasticsearch│   └── test_json_output.py
-
-- Sentence Transformers
-
-فایل `.env` را با اطلاعات خود پر کنید:├── examples/               # Usage examples
-
-## Author
-
-│   ├── basic_usage.py
-
-11linear11
-
-```env│   └── README.md
-
-## License
-
-DEBUG_MODE=false├── config/                 # Configuration files
-
-MIT License
-
-│   └── .env.example       # Environment variables template
-
-# NVIDIA API├── script/                 # Utility scripts
-
-api_key=your_nvidia_api_key├── main.py                # Main entry point
-
-├── requirements.txt       # Python dependencies
-
-# Elasticsearch├── .env                   # Environment variables (create from .env.example)
-
-ELASTICSEARCH_HOST=your_host├── .gitignore
-
-ELASTICSEARCH_PORT=9200└── README.md
-
-ELASTICSEARCH_USER=elastic```
-
-ELASTICSEARCH_PASSWORD=your_password
-
-ELASTICSEARCH_INDEX=shopping_products## Installation 🚀
-
-```
-
-1. **Clone the repository**:
-
-## استفاده```bash
-
-git clone https://github.com/11linear11/ShoppingAiAssistant.git
-
-اجرای برنامه:cd ShoppingAiAssistant
-
-```bash```
-
-python main.py
-
-```2. **Create virtual environment**:
-
-```bash
-
-مثال:python -m venv venv
-
-```source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-User: دوغ آبعلی میخوام```
-
-Assistant: 
-
-🛒 دوغ گازدار آبعلی ۲۶۰ میلی لیتری3. **Install dependencies**:
-
-   💰 قیمت: 23,375 تومان```bash
-
-   🏷️ برند: آبعلیpip install -r requirements.txt
-
-   🔥 تخفیف: 15%```
-
-```
-
-4. **Configure environment variables**:
-
-## API```bash
-
-cp config/.env.example .env
-
-```python# Edit .env and add your API keys
-
-from src.agent import create_agent```
-
-from langchain_core.messages import HumanMessage
-
-## Configuration ⚙️
-
-graph = create_agent()
-
-config = {"configurable": {"thread_id": "session_1"}}Edit `.env` file with your credentials:
-
-
-
-state = graph.invoke(```env
-
-    {"messages": [HumanMessage(content="هدفون ارزان")]},# Debug Mode (optional - for detailed logging)
-
-    config=configDEBUG_MODE=false  # Set to true for debugging
-
-)
-
-print(state['messages'][-1].content)# NVIDIA AI Endpoints
-
-```api_key=your_nvidia_api_key_here
-
-
-
-## تکنولوژی‌ها# Elasticsearch
-
-ELASTICSEARCH_HOST=your_elasticsearch_host
-
-- LangChain & LangGraphELASTICSEARCH_PORT=9200
-
-- NVIDIA AI EndpointsELASTICSEARCH_USER=elastic
-
-- ElasticsearchELASTICSEARCH_PASSWORD=your_password
-
-- Sentence TransformersELASTICSEARCH_INDEX=shopping_products
-
-ELASTICSEARCH_SCHEME=http
-
-## نویسنده```
-
-
-
-11linear11## Usage 💻
-
-
-
-## لایسنس### Basic Usage
-
-
-
-MIT LicenseRun the interactive CLI:
-
-
-```bash
-python main.py
-```
-
-Example conversation:
-```
-User: سلام
-Assistant: {"message": "سلام! چطور می‌تونم کمکتون کنم؟"}
-
-User: دوغ آبعلی میخوام
-Assistant: {"products": [...]}
-```
-
-### Debug Mode 🐛
-
-For detailed logging and debugging:
-
-```bash
-# Enable debug mode in .env
-DEBUG_MODE=true
-
-# Run the app
-python main.py
-
-# Check debug log file
-tail -f shopping_assistant_debug.log
-```
-
-See [DEBUG_GUIDE.md](DEBUG_GUIDE.md) for complete debugging documentation.
-
-### Python API
-
+---
+
+## 🎯 How It Works (Simplified)
+
+1. **User sends query**: "یه هدفون ارزان میخوام"
+
+2. **Agent calls interpret_query**:
+   ```json
+   {
+     "category": "لوازم الکترونیکی",
+     "intent": "find_cheapest",
+     "suggested_query": "هدفون"
+   }
+   ```
+
+3. **Agent calls search_products_semantic**:
+   - Generates embedding for "هدفون"
+   - Searches Elasticsearch (hybrid: BM25 + Vector)
+   - Gets 50 candidates
+
+4. **Reranking**:
+   - Calculates value_score for each
+   - Filters by relevance (similarity ≥ 0.4)
+   - Sorts by value_score
+   - Returns top 5
+
+5. **Agent formats response**:
+   ```
+   🛒 هدفون JBL Tune 500BT
+      💰 قیمت: 850,000 تومان
+      🏷️ برند: JBL
+      🔥 تخفیف: 10%
+   ```
+
+---
+
+## 🔍 Value Score Formula
+
+**Default:**
 ```python
-from src.agent import create_agent
-from langchain_core.messages import HumanMessage
-
-# Create agent
-graph = create_agent()
-config = {"configurable": {"thread_id": "session_1"}}
-
-# Send message
-state = graph.invoke(
-    {"messages": [HumanMessage(content="دوغ پیدا کن برام")]},
-    config=config
+value_score = (
+    brand_score × quality_sensitivity +
+    similarity × 0.4 +
+    discount × 0.2 -
+    normalized_price × price_sensitivity
 )
-
-# Get response
-print(state['messages'][-1].content)
 ```
 
-### Run Tests
+**Adjusts based on intent:**
+- `find_cheapest`: Price weight = 2.0
+- `find_high_quality`: Brand weight = 1.5
+- `find_by_feature`: Similarity weight = 1.5
 
-```bash
-# Test JSON output
-python tests/test_json_output.py
+---
 
-# Basic usage example
-python examples/basic_usage.py
-```
+## 📖 Full Documentation
 
-## JSON Response Format 📋
+For comprehensive details, see:
+- **[DOCUMENTATION.md](DOCUMENTATION.md)** - Complete technical documentation (1800+ lines)
 
-### Product Search Response
-```json
-{
-  "products": [
-    {
-      "name": "دوغ گازدار آبعلی ۲۶۰ میلی لیتری",
-      "price": 27500,
-      "final_price": 23375,
-      "brand": "آبعلی",
-      "brand_score": 0.762,
-      "discount": 15,
-      "product_id": "3546253",
-      "similarity": 0.872,
-      "value_score": 5.234,
-      "category": "لبنیات"
-    }
-  ]
-}
-```
+Covers:
+- Detailed architecture diagrams
+- API reference
+- Performance optimization
+- Advanced features
+- Contributing guidelines
+- Troubleshooting guide
+- Future enhancements
 
-**New Fields:**
-- `final_price`: Price after discount calculation
-- `brand_score`: Quality score of the brand (from BrandScore.json)
-- `value_score`: Overall value ranking (higher = better deal)
+---
 
-### Query Intent Response
-```json
-{
-  "category": "لپ تاپ",
-  "intent": "find_cheapest",
-  "price_sensitivity": 0.9,
-  "quality_sensitivity": 0.3
-}
-```
+## 🤝 Contributing
 
-### Chat Response
-```json
-{
-  "message": "سلام! چطور می‌تونم کمکتون کنم؟"
-}
-```
+1. Fork the repository
+2. Create feature branch: `git checkout -b feature/name`
+3. Commit changes: `git commit -m 'Add feature'`
+4. Push: `git push origin feature/name`
+5. Open Pull Request
 
-## Tech Stack 🛠️
+---
 
-- **LangChain & LangGraph**: Agent orchestration and conversation flow
-- **NVIDIA AI Endpoints**: LLM inference (gpt-oss-120b)
-- **Elasticsearch 9.2.0**: Vector search and product indexing
-- **Sentence Transformers**: Multilingual embeddings (intfloat/multilingual-e5-base)
-- **Python 3.13**: Runtime environment
+## 📞 Support
 
-## Key Components 🔑
+- **GitHub Issues**: [Create issue](https://github.com/11linear11/ShoppingAiAssistant/issues)
+- **Full Docs**: [DOCUMENTATION.md](DOCUMENTATION.md)
 
-### Agent (src/agent.py)
-- LangGraph-based conversational agent
-- Automatic tool calling (interpret_query → search_products_semantic)
-- JSON response node for direct output
-- Memory persistence with MemorySaver
+---
 
-### Search Tool (src/tools/SearchProducts.py)
-- **Hybrid Search**: BM25 + Semantic embedding
-- **Query Interpretation**: LLM-based intent analysis
-- **Dynamic Filtering**: Median-based similarity threshold
-- **Value Reranking**: `brand_score × quality + 0.4 × similarity - price_sensitivity × final_price`
-- **Brand Scoring**: Loads quality scores from BrandScore.json
-- **Discount Calculation**: Automatic final_price = price - (price × discount / 100)
-- Multilingual support (Persian, English, Arabic, etc.)
-- JSON formatted output
-
-### Tools Available:
-1. **`interpret_query(query)`**: Analyzes user intent and preferences
-   - Extracts: category, intent, price_sensitivity, quality_sensitivity
-   
-2. **`search_products_semantic(query, quality_sensitivity, price_sensitivity)`**: Searches and ranks products
-   - Hybrid BM25 + embedding search
-   - Dynamic filtering
-   - Value-based reranking
-
-## Development 🔧
-
-### Adding New Tools
-
-1. Create tool in `src/tools/`
-2. Decorate with `@tool`
-3. Import in `src/agent.py`
-4. Add to tools list
-
-### Cleaning Up
-
-```bash
-# Remove cache files
-find . -type d -name __pycache__ -exec rm -rf {} +
-find . -type f -name "*.pyc" -delete
-
-# Remove backup files
-rm -f *_old.py *.backup
-```
-
-## Troubleshooting 🐛
-
-### Import Errors
-Make sure you're running from the project root:
-```bash
-cd ShoppingAiAssistant
-python main.py
-```
-
-### Elasticsearch Connection
-Check your Elasticsearch credentials in `.env` file.
-
-### Token Limit Issues
-The agent uses a `json_response` node to bypass LLM token limits for product results.
-
-## Contributing 🤝
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## License 📄
-
-This project is licensed under the MIT License.
-
-## Author ✍️
-
-11linear11
-
-## Acknowledgments 🙏
-
-- LangChain team for the amazing framework
-- Elasticsearch for powerful search capabilities
-- HuggingFace for multilingual embeddings
+**Version**: 1.0.0  
+**Last Updated**: November 25, 2025  
+**License**: MIT
