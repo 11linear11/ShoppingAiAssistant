@@ -100,39 +100,6 @@ This project provides a conversational agent that:
 
 ---
 
-## 🏗️ Architecture
-
-```
-User ➜ LangGraph Agent
-            ├─ interpret_query (LLM → structured intent)
-            └─ search_products_semantic (Elasticsearch + embeddings)
-                                             └─ ProductSearchEngine (singleton)
-                                                   ├─ SentenceTransformer (multilingual-e5-base)
-                                                   ├─ Elasticsearch (BM25 + script_score cosine)
-                                                   └─ BrandScore.json (brand reputation)
-```
-
----
-
-## 📁 Project Structure
-
-```
-ShoppingAiAssistant/
-├── main.py                 # CLI entry point
-├── src/
-│   ├── agent.py           # LangGraph agent, tools binding, memory
-│   └── tools/
-│       └── SearchProducts.py  # Search engine + tools (interpret_query, search_products_semantic)
-├── config/
-│   └── .env.example       # Environment template
-├── BrandScore.json        # Precomputed brand scores
-├── CategoryW.json         # Category weights (script reference)
-├── requirements.txt       # Dependencies
-└── DOCUMENTATION.md       # Full technical documentation
-```
-
----
-
 ## ⚙️ Setup & Run
 
 ### 1) Install
