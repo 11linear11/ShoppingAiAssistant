@@ -7,51 +7,49 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
+import sys
 import logging
 from typing import Annotated
 from typing_extensions import TypedDict
 
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode ,tools_condition
+from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
 
-# Import the semantic search tool
-from .tools.SearchProducts import search_products_semantic , interpret_query
+# Import the semantic search tools
+from .tools.SearchProducts import search_products_semantic, interpret_query
 
 
 # Configuration
 api_key = os.getenv("api_key")
 BASE_URL = "https://integrate.api.nvidia.com/v1"
-
-# api_key = os.getenv("OPENAI_API_KEY")
-# BASE_URL = "https://models.inference.ai.azure.com"
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 
-# Setup logging
-def setup_logging():
-    """Configure logging based on DEBUG_MODE."""
-    if DEBUG_MODE:
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('shopping_assistant_debug.log'),
-                logging.StreamHandler()
-            ]
-        )
-    else:
-        logging.basicConfig(
-            level=logging.WARNING,
-            format='%(asctime)s - %(levelname)s - %(message)s'
-        )
-    
-    return logging.getLogger(__name__)
+# Setup logging properly
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG if DEBUG_MODE else logging.WARNING)
 
-logger = setup_logging()
+# Remove existing handlers
+if logger.handlers:
+    logger.handlers.clear()
+
+# Console handler
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.DEBUG if DEBUG_MODE else logging.WARNING)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+
+# File handler for debug mode
+if DEBUG_MODE:
+    file_handler = logging.FileHandler('agent_debug.log')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    logger.info("🔧 Agent DEBUG_MODE is ON")
 
 # System prompt
 SYSTEM_PROMPT = """You are an intelligent shopping assistant. Your task is that when the user intends to find a product, you analyze their phrase and then perform a product search.
@@ -60,11 +58,11 @@ You only have two tools:
 
 1) interpret_query  
    Input: {"query": "<full user text>"}  
-   Output: includes information such as category, intent, price_sensitivity, quality_sensitivity, AND suggested_query
+   Output: includes information such as categories (LIST of top 3 categories), intent, price_sensitivity, quality_sensitivity, AND suggested_query
 
 2) search_products_semantic  
-   Input: {"query": "<product keyword>", "quality_sensitivity": 0.5, "price_sensitivity": 0.5, "category": "<category>", "intent": "<intent>"}  
-   You must use ALL outputs from interpret_query including category, intent, AND suggested_query.
+   Input: {"query": "<product keyword>", "quality_sensitivity": 0.5, "price_sensitivity": 0.5, "categories": ["cat1", "cat2", ...], "intent": "<intent>"}  
+   You must use ALL outputs from interpret_query including categories (as a LIST), intent, AND suggested_query.
 
 -----------------------------------------------
 ### Mandatory Rules
@@ -72,7 +70,7 @@ You only have two tools:
 - Always call interpret_query first.
 - Then based on its output, call search_products_semantic and **you must pass ALL these fields**:
   * query: USE "suggested_query" from interpret_query output! (This is the most important field)
-  * category: from interpret_query output (if not null)
+  * categories: from interpret_query output (THIS IS A LIST like ["کتگوری1", "کتگوری2", "کتگوری3"])
   * intent: from interpret_query output (ALWAYS pass this!)
   * price_sensitivity: from interpret_query output
   * quality_sensitivity: from interpret_query output
@@ -80,10 +78,10 @@ You only have two tools:
 - Example flow 1 (direct product mention):
   1. User says: "یه هدفون ارزان میخوام"
   2. Call interpret_query({"query": "یه هدفون ارزان میخوام"})
-  3. Get result: {"category": "لوازم الکترونیکی", "intent": "find_cheapest", "price_sensitivity": 1.0, "quality_sensitivity": 0.0, "suggested_query": "هدفون"}
+  3. Get result: {"categories": ["لوازم الکترونیکی", "لوازم برقی و دیجیتال", "کودک و نوزاد"], "intent": "find_cheapest", "price_sensitivity": 1.0, "quality_sensitivity": 0.0, "suggested_query": "هدفون"}
   4. Call search_products_semantic({
        "query": "هدفون",  ← از suggested_query
-       "category": "لوازم الکترونیکی",
+       "categories": ["لوازم الکترونیکی", "لوازم برقی و دیجیتال", "کودک و نوزاد"],  ← لیست کتگوری‌ها!
        "intent": "find_cheapest",
        "price_sensitivity": 1.0,
        "quality_sensitivity": 0.0
@@ -92,10 +90,10 @@ You only have two tools:
 - Example flow 2 (implicit intent - user describes need):
   1. User says: "یچیز میخوام بپوشم سردم نشه"
   2. Call interpret_query({"query": "یچیز میخوام بپوشم سردم نشه"})
-  3. Get result: {"category": "مد و پوشاک", "intent": "find_by_feature", "price_sensitivity": 0.5, "quality_sensitivity": 0.5, "suggested_query": "کاپشن"}
+  3. Get result: {"categories": ["مد و پوشاک", "کودک و نوزاد", "خانه و سبک زندگی"], "intent": "find_by_feature", "price_sensitivity": 0.5, "quality_sensitivity": 0.5, "suggested_query": "کاپشن"}
   4. Call search_products_semantic({
        "query": "کاپشن",  ← از suggested_query (نه متن کاربر!)
-       "category": "مد و پوشاک",
+       "categories": ["مد و پوشاک", "کودک و نوزاد", "خانه و سبک زندگی"],  ← لیست کتگوری‌ها!
        "intent": "find_by_feature",
        "price_sensitivity": 0.5,
        "quality_sensitivity": 0.5
@@ -197,7 +195,7 @@ def create_agent():
     """
     logger.info("🚀 Creating Shopping AI Agent...")
     logger.debug(f"Debug Mode: {DEBUG_MODE}")
-    logger.debug(f"LLM Model: openai/gpt-oss-20b")
+    logger.debug(f"LLM Model: openai/gpt-oss-120b")
     
     # Initialize LLM
     llm = ChatNVIDIA(
@@ -207,13 +205,7 @@ def create_agent():
         max_tokens=2048,  # افزایش max_tokens برای جلوگیری از cut off
         temperature=0.3,  # کمتر برای پاسخ‌های دقیق‌تر
     )
-    # llm = ChatOpenAI(
-    #     model="gpt-4o",
-    #     openai_api_key=api_key,
-    #     openai_api_base=BASE_URL
-    # )
 
-    
     logger.debug("✅ LLM initialized successfully")
     
     # Bind tools to LLM
@@ -270,8 +262,6 @@ def create_agent():
     tool_node = ToolNode(tools)
     logger.debug("🛠️ Tool node created")
     
-    
-    
     # Build graph
     logger.debug("🏗️ Building graph structure...")
     builder = StateGraph(State)
@@ -281,7 +271,7 @@ def create_agent():
     # Define edges
     builder.add_edge(START, "chatbot")
     builder.add_conditional_edges("chatbot", tools_condition)
-    builder.add_edge("tools","chatbot")
+    builder.add_edge("tools", "chatbot")
     
     logger.debug("🔗 Graph edges configured")
     

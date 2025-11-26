@@ -4,6 +4,7 @@ This module provides semantic search functionality for products.
 """
 
 import os
+import sys
 import json
 import re
 import logging
@@ -14,14 +15,72 @@ from sentence_transformers import SentenceTransformer
 from elasticsearch import Elasticsearch
 from langchain_core.tools import tool
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
-from langchain_openai import ChatOpenAI
-
 
 load_dotenv()
 
-# Setup logging
+# Setup logging properly
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
+
+# Configure logger for this module
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG if DEBUG_MODE else logging.WARNING)
+
+# Remove existing handlers to avoid duplicates
+if logger.handlers:
+    logger.handlers.clear()
+
+# Create console handler
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.DEBUG if DEBUG_MODE else logging.WARNING)
+
+# Create formatter
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(formatter)
+
+# Add handler to logger
+logger.addHandler(console_handler)
+
+# Also add file handler if DEBUG_MODE
+if DEBUG_MODE:
+    file_handler = logging.FileHandler('search_products_debug.log')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    logger.info(f"🔧 DEBUG_MODE is ON - logging to console and file")
+else:
+    logger.warning("DEBUG_MODE is OFF")
+
+
+# Path to pre-computed category embeddings
+CATEGORY_EMBEDDINGS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "full_category_embeddings.json")
+
+
+def cosine_similarity(vec1, vec2):
+    """Calculate cosine similarity between two vectors."""
+    import numpy as np
+    vec1 = np.array(vec1)
+    vec2 = np.array(vec2)
+    dot_product = np.dot(vec1, vec2)
+    norm1 = np.linalg.norm(vec1)
+    norm2 = np.linalg.norm(vec2)
+    if norm1 == 0 or norm2 == 0:
+        return 0.0
+    return dot_product / (norm1 * norm2)
+
+
+def load_category_embeddings() -> Dict:
+    """Load pre-computed category embeddings from JSON file."""
+    try:
+        with open(CATEGORY_EMBEDDINGS_PATH, 'r', encoding='utf-8') as f:
+            embeddings = json.load(f)
+        logger.info(f"✅ Loaded {len(embeddings)} category embeddings from file")
+        return embeddings
+    except FileNotFoundError:
+        logger.error(f"❌ Category embeddings file not found: {CATEGORY_EMBEDDINGS_PATH}")
+        return {}
+    except json.JSONDecodeError as e:
+        logger.error(f"❌ Error parsing category embeddings JSON: {e}")
+        return {}
 
 
 class ProductSearchEngine:
@@ -46,6 +105,11 @@ class ProductSearchEngine:
         logger.debug(f"📦 Loading embedding model: {model_name}")
         self.model = SentenceTransformer(model_name)
         logger.debug("✅ Embedding model loaded")
+        
+        # Load pre-computed category embeddings from file
+        logger.debug("🏷️ Loading category embeddings from file...")
+        self.category_embeddings = load_category_embeddings()
+        logger.debug(f"✅ Loaded embeddings for {len(self.category_embeddings)} categories")
         
         # Elasticsearch configuration
         ES_HOST = os.getenv("ELASTICSEARCH_HOST", "localhost")
@@ -78,7 +142,39 @@ class ProductSearchEngine:
         
         ProductSearchEngine._initialized = True
     
-    def search(self, query_text: str, top_k: int = 5, min_similarity: float = 0.3, category: str = None) -> List[Dict]:
+    def classify_categories(self, query: str, top_k: int = 3, threshold: float = 0.3) -> List[Dict]:
+        """
+        Find top-k categories most similar to the query using embedding cosine similarity.
+        
+        Args:
+            query: User's search query
+            top_k: Number of top categories to return
+            threshold: Minimum similarity score to include a category
+            
+        Returns:
+            List of dicts with 'category' and 'similarity' keys, sorted by similarity descending
+        """
+        logger.debug(f"🏷️ Classifying categories for query: '{query}'")
+        
+        # Generate query embedding
+        query_vec = self.model.encode([query])[0]
+        
+        # Calculate similarity with all categories
+        scores = []
+        for cat, cat_emb in self.category_embeddings.items():
+            sim = cosine_similarity(query_vec, cat_emb)
+            scores.append({"category": cat, "similarity": float(sim)})
+        
+        # Sort by similarity descending
+        scores.sort(key=lambda x: x["similarity"], reverse=True)
+        
+        # Filter by threshold and take top-k
+        top_categories = [s for s in scores[:top_k]]
+        
+        logger.debug(f"✅ Top {len(top_categories)} categories: {[c['category'] for c in top_categories]}")
+        return top_categories
+    
+    def search(self, query_text: str, top_k: int = 5, min_similarity: float = 0.3, categories: List[str] = None) -> List[Dict]:
         """
         Perform hybrid search combining BM25 text matching and semantic similarity.
         
@@ -86,33 +182,34 @@ class ProductSearchEngine:
             query_text: Search query
             top_k: Number of results
             min_similarity: Minimum similarity score (0-1)
-            category: Optional category filter (e.g., "لپ تاپ", "گوشی موبایل")
+            categories: Optional list of categories to filter by (e.g., ["لپ تاپ", "گوشی موبایل"])
             
         Returns:
             List of product dictionaries sorted by combined relevance score
         """
         logger.info(f"🔍 Starting search for: '{query_text}'")
-        logger.debug(f"📊 Parameters: top_k={top_k}, min_similarity={min_similarity}, category={category}")
+        logger.debug(f"📊 Parameters: top_k={top_k}, min_similarity={min_similarity}, categories={categories}")
         
         # Generate embedding for semantic search
         logger.debug("🧠 Generating query embedding...")
         query_embedding = self.model.encode([query_text])[0].tolist()
         logger.debug(f"✅ Embedding generated (dim={len(query_embedding)})")
         
-        # Build query with BM25 + embedding hybrid search
-        must_conditions = []
-        
-        # Add category filter if provided
-        if category:
-            must_conditions.append({"match": {"category_name": category}})
-            logger.debug(f"🏷️ Category filter applied: {category}")
+        # Build filter for categories if provided
+        filter_clause = []
+        if categories and len(categories) > 0:
+            filter_clause.append({
+                "terms": {
+                    "category_name.keyword": categories
+                }
+            })
+            logger.debug(f"🏷️ Category filter applied: {categories}")
         
         # Hybrid search: BM25 (text) + semantic (embedding)
         search_body = {
             "size": 50, 
             "query": {
                 "bool": {
-                    "must": must_conditions if must_conditions else [{"match_all": {}}],
                     "should": [
                         # BM25 text search on product name and brand
                         {
@@ -135,6 +232,7 @@ class ProductSearchEngine:
                             }
                         }
                     ],
+                    "filter": filter_clause if filter_clause else None,
                     "minimum_should_match": 1
                 }
             }
@@ -187,6 +285,7 @@ class ProductSearchEngine:
             logger.error(f"❌ Elasticsearch error: {str(e)}")
             return []
 
+
 # Global LLM instance for interpret_query
 _llm_instance = None
 
@@ -212,12 +311,6 @@ def get_llm_instance():
             temperature=0.1,
             max_tokens=1000
         )
-        # Alternative: OpenAI
-        # _llm_instance = ChatOpenAI(
-        #     model="openai/gpt-4o",
-        #     api_key = os.getenv("OPENAI_API_KEY"),
-        #     base_url = "https://models.inference.ai.azure.com",   
-        # )
         
     return _llm_instance
 
@@ -226,283 +319,87 @@ def get_llm_instance():
 def interpret_query(query: str) -> str:
     """
     Analyze user shopping intent and extract structured information.
-    
-    This tool helps understand what the user is looking for by analyzing their query
-    and returning key insights about their shopping preferences and intent.
+    First LLM detects the product (suggested_query), then category classification is done based on that product.
     
     Args:
         query: User's shopping query in natural language (Persian, English, or other languages)
         
     Returns:
         JSON string with the following fields:
-        - category: Product category (e.g., "لپ تاپ", "گوشی", "هدفون")
+        - categories: List of top 3 matching categories based on suggested_query
         - intent: Shopping intent (find_cheapest, find_best_value, find_high_quality, compare, find_by_feature)
         - price_sensitivity: 0-1 (higher = more price-conscious)
         - quality_sensitivity: 0-1 (higher = more quality-focused)
         - suggested_query: A specific product keyword to search for
     """
     
-    # Available categories in Elasticsearch
-    AVAILABLE_CATEGORIES = [
-        "لوازم الکترونیکی",
-        "لوازم برقی و دیجیتال",
-        "مد و پوشاک",
-        "طلا",
-        "خانه و سبک زندگی",
-        "خانه و آشپزخانه",
-        "آرایشی و بهداشتی",
-        "نوشیدنی",
-        "لبنیات",
-        "کالاهای اساسی",
-        "کودک و نوزاد",
-        "خواربار و نان",
-        "بهداشت و سلامت",
-        "شوینده و مواد ضد عفونی کننده",
-        "مواد پروتئینی",
-        "میوه و سبزیجات تازه",
-        "دستمال و شوینده",
-        "محصولات سلولزی",
-        "چاشنی و افزودنی",
-        "تنقلات",
-        "کنسرو و غذای آماده",
-        "صبحانه",
-        "کنسرو و غذاهای آماده",
-        "آجیل و خشکبار",
-        "خشکبار، دسر و شیرینی",
-        "لوازم تحریر و اداری",
-        "دسر و شیرینی پزی",
-        "نان و شیرینی"
-    ]
+    logger.info(f"🧠 Interpreting query: '{query}'")
     
-    # Construct a clear, structured prompt
-    prompt =   f"""
-You are a purchase-intent interpreter. Your job is to convert each user message into structured data that can be used by the product search engine.
+    # Default values
+    intent = "find_best_value"
+    price_sens = 0.5
+    quality_sens = 0.5
+    suggested_query = query
+    
+    # 1. First, use LLM to detect product (suggested_query) and intent
+    prompt = f"""You are a purchase-intent interpreter. Analyze the user's shopping query and extract:
+1. intent: What the user wants to do
+2. price_sensitivity: How price-conscious they are (0-1)
+3. quality_sensitivity: How quality-focused they are (0-1)  
+4. suggested_query: A specific product keyword to search for
 
-Your output must be exactly one valid JSON object. Produce no additional text.
-
------------------------------------------------
-📋 Available categories in the system:
-{AVAILABLE_CATEGORIES}
-
------------------------------------------------
-Important Rules:
-
-1. **CATEGORY Detection:**
-
-   a) If the user mentions a *specific product*:
-   - "شورت", "تیشرت", "کفش" → "مد و پوشاک"
-   - "دوغ", "آبمیوه", "نوشابه" → "نوشیدنی"
-   - "ماست", "پنیر", "شیر" → "لبنیات"
-   - "لپ تاپ", "گوشی", "هدفون" → "لوازم الکترونیکی"
-   - "شامپو", "کرم", "رژلب" → "آرایشی و بهداشتی"
-   - "مایع ظرفشویی", "پودر لباسشویی" → "شوینده و مواد ضد عفونی کننده"
-   - "چیپس", "شکلات", "پفک" → "تنقلات"
-
-   b) If the user only gives *abstract properties*:
-   - "نرم", "لطیف", "راحت" → likely "مد و پوشاک" or "دستمال و شوینده"
-   - "ترد", "خوشمزه" → likely "تنقلات"
-   - "تند", "فلفلی", "تیز" → likely "تنقلات" or "چاشنی و افزودنی"
-   - "خنک", "خوشبو" (for liquids) → likely "نوشیدنی" or "آرایشی و بهداشتی"
-   - "خوشبو" (cleaning items) → likely "شوینده و مواد ضد عفونی کننده"
-   - "تازه" → likely "میوه و سبزیجات تازه" or "لبنیات" or "نان و شیرینی"
-
-   c) **Important rule:** you must ALWAYS guess a category!  
-      Only return null if the message is completely unrelated to buying.
-      - If the user mentions a taste (تند, شیرین, ترش) → "تنقلات" or "چاشنی و افزودنی"
-      - If the user mentions a physical feel (نرم, سبک) → "مد و پوشاک"
-
-2. **intent** must be one of the following (never return null!):
-   - find_cheapest        → user wants the cheapest option
-   - find_best_value      → user wants best price/quality ratio
-   - find_high_quality    → user prioritizes quality
-   - compare              → user wants to compare options
-   - find_by_feature      → user mentions a specific feature (size, softness, flavor, etc.)
-
-3. **price_sensitivity:**
-   - 1.0 → words like "ارزون", "ارزان‌ترین", "مقرون‌به‌صرفه", "اقتصادی"
-   - 0.5 → indirect or unclear mention of cost
-   - 0   → no price-related mention
-
-4. **quality_sensitivity:**
-   - 1.0 → words like "کیفیت بالا", "محکم", "دوام", "پرفورمنس بالا", "نرم", "لطیف"
-   - 0.5 → unclear or partial quality mention
-   - 0   → no quality mention
-
-5. **suggested_query (مهم!):**
-   این فیلد باید یک کلمه کلیدی مشخص محصول باشد که برای جستجو استفاده بشه.
-   
-   اگر کاربر محصول مشخص گفت → همون محصول
-   اگر کاربر مبهم صحبت کرد → یک محصول مناسب پیشنهاد بده
-   
-   مثال‌ها:
-   - "یچیز میخوام بپوشم سردم نشه" → suggested_query: "کاپشن"
-   - "گشنمه" → suggested_query: "بیسکویت"
-   - "تشنمه" → suggested_query: "آب معدنی"
-   - "میخوام موهامو بشورم" → suggested_query: "شامپو"
-   - "پوستم خشکه" → suggested_query: "کرم مرطوب کننده"
-   - "یچیز تند میخوام" → suggested_query: "چیپس تند"
-   - "یچیز شیرین میخوام" → suggested_query: "شکلات"
-   - "میخوام یه چیز گرم بخورم" → suggested_query: "سوپ"
-   - "خوابم میاد" → suggested_query: "قهوه"
-   - "هدفون میخوام" → suggested_query: "هدفون"
+Output ONLY a valid JSON object with these 4 fields. No other text.
 
 -----------------------------------------------
-### Direct Examples (specific product)
+### Intent Types (choose one):
+- find_cheapest: user wants the cheapest option ("ارزان", "ارزان‌ترین")
+- find_best_value: user wants best price/quality ratio ("مقرون‌به‌صرفه")
+- find_high_quality: user prioritizes quality ("کیفیت بالا", "محکم")
+- compare: user wants to compare options ("مقایسه")
+- find_by_feature: user mentions a specific feature ("نرم", "تند", "خنک")
 
-User: "دوغ خوشمزه و ارزون"
-{{
-  "category": "نوشیدنی",
-  "intent": "find_best_value",
-  "price_sensitivity": 1,
-  "quality_sensitivity": 1,
-  "suggested_query": "دوغ"
-}}
+### Price Sensitivity:
+- 1.0: words like "ارزون", "ارزان‌ترین", "مقرون‌به‌صرفه", "اقتصادی"
+- 0.5: indirect or unclear mention of cost
+- 0.0: no price-related mention
 
-User: "شورت ورزشی نرم می‌خوام"
-{{
-  "category": "مد و پوشاک",
-  "intent": "find_by_feature",
-  "price_sensitivity": 0,
-  "quality_sensitivity": 1,
-  "suggested_query": "شورت ورزشی"
-}}
+### Quality Sensitivity:
+- 1.0: words like "کیفیت بالا", "محکم", "دوام", "نرم", "لطیف"
+- 0.5: unclear or partial quality mention
+- 0.0: no quality mention
 
-User: "چیپس ساده ارزان"
-{{
-  "category": "تنقلات",
-  "intent": "find_cheapest",
-  "price_sensitivity": 1,
-  "quality_sensitivity": 0,
-  "suggested_query": "چیپس"
-}}
-
------------------------------------------------
-### Implicit Intent Examples (user describes need, not product)
-
-User: "یچیز میخوام بپوشم سردم نشه"
-{{
-  "category": "مد و پوشاک",
-  "intent": "find_by_feature",
-  "price_sensitivity": 0.5,
-  "quality_sensitivity": 0.5,
-  "suggested_query": "کاپشن"
-}}
-
-User: "گشنمه یچیز بده"
-{{
-  "category": "تنقلات",
-  "intent": "find_by_feature",
-  "price_sensitivity": 0.5,
-  "quality_sensitivity": 0.5,
-  "suggested_query": "بیسکویت"
-}}
-
-User: "تشنمه"
-{{
-  "category": "نوشیدنی",
-  "intent": "find_by_feature",
-  "price_sensitivity": 0.5,
-  "quality_sensitivity": 0.5,
-  "suggested_query": "آب معدنی"
-}}
-
-User: "پوستم خشکه"
-{{
-  "category": "آرایشی و بهداشتی",
-  "intent": "find_by_feature",
-  "price_sensitivity": 0.5,
-  "quality_sensitivity": 0.5,
-  "suggested_query": "کرم مرطوب کننده"
-}}
-
-User: "خوابم میاد باید بیدار بمونم"
-{{
-  "category": "نوشیدنی",
-  "intent": "find_by_feature",
-  "price_sensitivity": 0.5,
-  "quality_sensitivity": 0.5,
-  "suggested_query": "قهوه"
-}}
-
------------------------------------------------
-### Ambiguous Examples (only features)
-
-User: "من یه چیز تند میخوام"
-{{
-  "category": "تنقلات",
-  "intent": "find_by_feature",
-  "price_sensitivity": 0.5,
-  "quality_sensitivity": 0.5,
-  "suggested_query": "چیپس تند"
-}}
-
-User: "یه چیز نرم"
-{{
-  "category": "مد و پوشاک",
-  "intent": "find_by_feature",
-  "price_sensitivity": 0.5,
-  "quality_sensitivity": 0.5,
-  "suggested_query": "تیشرت"
-}}
-
-User: "یه نوشیدنی خنک"
-{{
-  "category": "نوشیدنی",
-  "intent": "find_by_feature",
-  "price_sensitivity": 0.5,
-  "quality_sensitivity": 0.5,
-  "suggested_query": "آب معدنی"
-}}
-
------------------------------------------------
-### Final Rules
-- Think step-by-step internally, but do NOT output your reasoning. 
-Never include analysis, thoughts, explanations, or chain-of-thought in the output. 
-Output only the final JSON.
-- You MUST output ONLY one valid JSON object.
-If you output anything else (text, explanation, markdown, analysis), it will be considered an error.
-- If multiple interpretations exist, choose the most likely one.
-- If any feature is mentioned → intent = find_by_feature
-- **Always guess a category!**  
-- **Always return an intent! Never return null.**
-- **Always provide a suggested_query!** This is the keyword for product search.
+### Suggested Query Rules:
+- If user mentions a specific product → use that exact product
+- If user speaks vaguely → suggest an appropriate product
+- Examples:
+  - "یچیز میخوام بپوشم سردم نشه" → "کاپشن"
+  - "گشنمه" → "بیسکویت"
+  - "تشنمه" → "آب معدنی"
+  - "هدفون میخوام" → "هدفون"
+  - "دوغ خوشمزه" → "دوغ"
 
 -----------------------------------------------
 User Query: {query}
 
-Your output must match this exact structure:
-
+Output JSON:
 {{
-  "category": "...",
   "intent": "...",
   "price_sensitivity": 0.0,
   "quality_sensitivity": 0.0,
   "suggested_query": "..."
 }}
-
-Do not add or remove any fields.
-Do not write any text outside this JSON.
-
-
 """
 
-    
-    logger.info(f"🧠 Interpreting query: '{query}'")
-    
     try:
         # Get LLM instance
-        logger.debug("🤖 Getting LLM instance for interpretation...")
+        logger.debug("🤖 Getting LLM instance for intent analysis...")
         llm = get_llm_instance()
         
         # Invoke LLM
         logger.debug("💭 Invoking LLM for intent analysis...")
         response = llm.invoke(prompt)
         
-        # Debug: Log the full response object structure
-        logger.debug(f"📄 Raw response type: {type(response)}")
-        logger.debug(f"📄 Raw response: {response}")
-        
-        # Try multiple ways to extract content
+        # Extract content from response
         response_text = ""
         if hasattr(response, 'content') and response.content:
             response_text = response.content.strip()
@@ -513,110 +410,57 @@ Do not write any text outside this JSON.
         elif isinstance(response, str):
             response_text = response.strip()
         else:
-            # Last resort: convert to string
             response_text = str(response).strip()
         
-        logger.debug(f"📄 Extracted response_text: '{response_text[:200] if response_text else 'EMPTY'}'")
+        logger.debug(f"📄 LLM response: '{response_text[:200] if response_text else 'EMPTY'}'")
         
-        # Check if response is empty
-        if not response_text:
-            logger.warning("⚠️ LLM returned empty response! Using fallback values.")
-            fallback = {
-                "category": "نامشخص",
-                "intent": "find_best_value",
-                "price_sensitivity": 0.5,
-                "quality_sensitivity": 0.5,
-                "suggested_query": query,
-            }
-            return json.dumps(fallback, ensure_ascii=False)
+        if response_text:
+            # Extract JSON from response
+            json_match = re.search(r'\{[^}]+\}', response_text, re.DOTALL)
+            if json_match:
+                try:
+                    parsed = json.loads(json_match.group(0))
+                    intent = parsed.get("intent", intent)
+                    price_sens = float(parsed.get("price_sensitivity", price_sens))
+                    quality_sens = float(parsed.get("quality_sensitivity", quality_sens))
+                    suggested_query = parsed.get("suggested_query", query) or query
+                except json.JSONDecodeError:
+                    logger.warning("⚠️ Failed to parse LLM JSON, using defaults")
         
-        # Extract JSON from response (in case LLM adds extra text)
-        json_match = re.search(r'\{[^}]+\}', response_text, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(0)
-            logger.debug("✅ JSON extracted from response")
-        else:
-            json_str = response_text
-            logger.debug("⚠️ Using full response as JSON")
+        logger.info(f"🎯 LLM detected product: '{suggested_query}'")
         
-        # Validate JSON structure
-        try:
-            parsed = json.loads(json_str)
-            logger.debug(f"✅ JSON parsed successfully: {parsed}")
-            logger.debug(f"🔍 Parsed fields: {list(parsed.keys())}")
-            
-            # Handle null values from JSON (become None in Python)
-            category = parsed.get("category")
-            intent = parsed.get("intent")
-            price_sens = parsed.get("price_sensitivity")
-            quality_sens = parsed.get("quality_sensitivity")
-            suggested_query = parsed.get("suggested_query")
-            
-            # Smart defaults for null/None values
-            if category is None:
-                category = "نامشخص"
-                logger.debug("⚠️ Category was null, using 'نامشخص'")
-            
-            if intent is None:
-                intent = "find_by_feature"  # Default for ambiguous queries
-                logger.debug("⚠️ Intent was null, using 'find_by_feature'")
-            
-            if suggested_query is None:
-                # اگر suggested_query نبود، از query اصلی استفاده کن
-                suggested_query = query
-                logger.debug(f"⚠️ suggested_query was null, using original query: '{query}'")
-            
-            # Ensure required fields exist with defaults
-            result = {
-                "category": category,
-                "intent": intent,
-                "price_sensitivity": float(price_sens) if price_sens is not None else 0.5,
-                "quality_sensitivity": float(quality_sens) if quality_sens is not None else 0.5,
-                "suggested_query": suggested_query,
-            }
-            
-            # Clamp values between 0 and 1
-            for key in ["price_sensitivity", "quality_sensitivity"]:
-                result[key] = max(0.0, min(1.0, result[key]))
-            
-            logger.info(f"✅ Intent analysis complete: category={result['category']}, "
-                       f"intent={result['intent']}, "
-                       f"suggested_query='{result['suggested_query']}', "
-                       f"price_sens={result['price_sensitivity']:.2f}, "
-                       f"quality_sens={result['quality_sensitivity']:.2f}")
-            
-            return json.dumps(result, ensure_ascii=False)
-            
-        except json.JSONDecodeError as e:
-            logger.warning(f"⚠️ JSON decode error: {e}. Using fallback values.")
-            # Fallback: return default values
-            fallback = {
-                "category": "نامشخص",
-                "intent": "find_best_value",
-                "price_sensitivity": 0.5,
-                "quality_sensitivity": 0.5,
-                "suggested_query": query,
-            }
-            return json.dumps(fallback, ensure_ascii=False)
-            
     except Exception as e:
-        logger.error(f"❌ Error in interpret_query: {str(e)}")
-        # In case of any error, return safe defaults
-        error_response = {
-            "category": "خطا",
-            "intent": "find_best_value",
-            "price_sensitivity": 0.5,
-            "quality_sensitivity": 0.5,
-            "suggested_query": query,
-            "error": str(e)
-        }
-        return json.dumps(error_response, ensure_ascii=False)
-
-
-
-
-
-
+        logger.error(f"❌ Error in LLM call: {str(e)}")
+        # Keep defaults
+    
+    # 2. Now use embedding-based category classification on suggested_query (not original query!)
+    search_engine = get_search_engine()
+    top_categories = search_engine.classify_categories(suggested_query, top_k=3, threshold=0.25)
+    
+    # Extract just category names for the list
+    category_names = [c["category"] for c in top_categories]
+    logger.debug(f"🏷️ Top categories for '{suggested_query}': {category_names}")
+    
+    # Clamp values
+    price_sens = max(0.0, min(1.0, price_sens))
+    quality_sens = max(0.0, min(1.0, quality_sens))
+    
+    # Build final result
+    result = {
+        "categories": category_names,  # Categories based on suggested_query
+        "intent": intent,
+        "price_sensitivity": price_sens,
+        "quality_sensitivity": quality_sens,
+        "suggested_query": suggested_query,
+    }
+    
+    logger.info(f"✅ Intent analysis complete: categories={result['categories']}, "
+               f"intent={result['intent']}, "
+               f"suggested_query='{result['suggested_query']}', "
+               f"price_sens={result['price_sensitivity']:.2f}, "
+               f"quality_sens={result['quality_sensitivity']:.2f}")
+    
+    return json.dumps(result, ensure_ascii=False)
 
 
 # Global instance
@@ -637,7 +481,7 @@ def get_brand_scores() -> Dict[str, float]:
     global _brand_scores
     if _brand_scores is None:
         try:
-            brand_score_path = os.path.join(os.path.dirname(__file__), '../../BrandScore.json')
+            brand_score_path = os.path.join(os.path.dirname(__file__), '../BrandScore.json')
             with open(brand_score_path, 'r', encoding='utf-8') as f:
                 _brand_scores = json.load(f)
         except:
@@ -646,7 +490,7 @@ def get_brand_scores() -> Dict[str, float]:
 
 
 @tool
-def search_products_semantic(query: str, quality_sensitivity: float = 0.5, price_sensitivity: float = 0.5, category: str = None, intent: str = None) -> str:
+def search_products_semantic(query: str, quality_sensitivity: float = 0.5, price_sensitivity: float = 0.5, categories: List[str] = None, intent: str = None) -> str:
     """
     Search for products using semantic search with Elasticsearch and intelligent reranking.
     Use this tool when the user wants to find, search, or look for products.
@@ -656,7 +500,7 @@ def search_products_semantic(query: str, quality_sensitivity: float = 0.5, price
         query: The product search query in natural language (e.g., "لپ تاپ گیمینگ", "cheap smartphone", "هدفون بی سیم")
         quality_sensitivity: User's quality preference (0-1), higher means quality matters more
         price_sensitivity: User's price preference (0-1), higher means cheaper is better
-        category: Product category filter (e.g., "مد و پوشاک", "نوشیدنی", "لوازم الکترونیکی")
+        categories: List of product category filters (e.g., ["مد و پوشاک", "نوشیدنی", "لوازم الکترونیکی"])
         intent: User's shopping intent (find_cheapest, find_best_value, find_high_quality, compare, find_by_feature)
         
     Returns:
@@ -665,8 +509,8 @@ def search_products_semantic(query: str, quality_sensitivity: float = 0.5, price
     logger.info(f"🛍️ Product search: '{query}'")
     logger.debug(f"⚙️ Sensitivity params: quality={quality_sensitivity:.2f}, price={price_sensitivity:.2f}")
     logger.debug(f"🎯 Intent: {intent}")
-    if category:
-        logger.info(f"🏷️ Category filter: '{category}'")
+    if categories:
+        logger.info(f"🏷️ Category filters: {categories}")
     
     # ═══════════════════════════════════════════════════════════════
     # 🎯 تنظیم پارامترها بر اساس intent
@@ -707,9 +551,9 @@ def search_products_semantic(query: str, quality_sensitivity: float = 0.5, price
         logger.debug("🔧 Getting search engine instance...")
         engine = get_search_engine()
         
-        # Perform search with category filter
+        # Perform search with category filters (list)
         logger.debug("🔍 Executing search...")
-        results = engine.search(query, top_k=100, min_similarity=0.3, category=category)
+        results = engine.search(query, top_k=100, min_similarity=0.3, categories=categories)
 
         if not results:
             logger.warning(f"⚠️ No products found for query: '{query}'")
