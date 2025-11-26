@@ -22,8 +22,7 @@ An intelligent, production-ready conversational shopping assistant built with **
 
 ---
 ## 🏗️ Architecture
-
-## 📁 Project Structure
+```
 User ➜ LangGraph Agent
             ├─ interpret_query (LLM)
             └─ search_products_semantic (Elasticsearch + embeddings)
