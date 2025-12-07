@@ -1,429 +1,184 @@
-# Shopping AI Assistant 🛍️🤖
+# 🛒 Shopping AI Assistant
 
-[![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Elasticsearch](https://img.shields.io/badge/Elasticsearch-9.2.0-orange.svg)](https://www.elastic.co/)
-[![LangGraph](https://img.shields.io/badge/LangGraph-1.0.2-green.svg)](https://github.com/langchain-ai/langgraph)
+An intelligent Persian shopping assistant powered by LangGraph, MCP (Model Context Protocol), and Elasticsearch. Uses EQuIP 3B for generating Elasticsearch DSL queries and multilingual embeddings for semantic search.
 
-An intelligent, production-ready conversational shopping assistant built with **LangGraph**, **Elasticsearch**, and **multilingual semantic search**. It understands Persian/Farsi and English, detects user intent, searches hybridly (BM25 + embeddings), and returns structured, ranked product results.
+## ✨ Features
 
----
-
-## 🌟 Features
-
-- 🧠 Intent-aware shopping (cheapest, high-quality, best value, compare, by feature)
-- 🔍 Hybrid search: BM25 keyword + semantic vector search (multilingual-e5-base)
-- 🌍 Multilingual: Native Persian/Farsi support
-- 📊 Smart reranking using brand score, price, similarity, discount
-- 🎯 Adaptive relevance filtering with dynamic thresholds
-- 💬 Conversation memory via LangGraph threads
-- ⚡ Fast responses powered by Elasticsearch vector search
-- 🖨️ Clean Persian output formatting with summaries
-
----
-## 🏗️ Architecture
-
-## 📁 Project Structure
-User ➜ LangGraph Agent
-            ├─ interpret_query (LLM)
-            └─ search_products_semantic (Elasticsearch + embeddings)
-                                       └─ ProductSearchEngine (singleton)
-                                             ├─ SentenceTransformer (multilingual-e5-base)
-                                             ├─ Elasticsearch (BM25 + script_score cosine)
-                                             └─ BrandScore.json (brand reputation)
-```
-
----
-
-## � Project Structure
-
-```
-ShoppingAiAssistant/
-├── main.py                 # CLI entry point
-├── src/
-│   ├── agent.py           # LangGraph agent, tools binding, memory
-│   └── tools/
-│       └── SearchProducts.py  # Search engine + tools (interpret_query, search_products_semantic)
-├── config/
-│   └── .env.example       # Environment template
-├── BrandScore.json        # Precomputed brand scores
-├── CategoryW.json         # Category weights (for brand scoring script)
-├── requirements.txt       # Dependencies
-└── DOCUMENTATION.md       # Full technical documentation
-```
-
----
-
-## ⚙️ Setup
-
-### 1) Install
-```bash
-pip install -r requirements.txt
-```
-
-### 2) Configure environment
-```bash
-cp config/.env.example .env
-# Edit values:
-# api_key=your_nvidia_api_key
-# ELASTICSEARCH_HOST=your_host
-# Shopping AI Assistant 🛍️🤖
-
-[![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Elasticsearch](https://img.shields.io/badge/Elasticsearch-9.2.0-orange.svg)](https://www.elastic.co/)
-[![LangGraph](https://img.shields.io/badge/LangGraph-1.0.2-green.svg)](https://github.com/langchain-ai/langgraph)
-
-An intelligent, production-ready conversational shopping assistant built with **LangGraph**, **Elasticsearch**, and **multilingual semantic search**. It understands Persian/Farsi and English, detects user intent, performs hybrid search (BM25 + embeddings), re-ranks results with smart scoring, and returns clean, structured product answers.
-
----
-
-## � Overview
-
-This project provides a conversational agent that:
-- Interprets user intent (cheapest, high-quality, best value, compare, feature)
-- Suggests a refined query keyword (`suggested_query`)
-- Searches products via Elasticsearch using BM25 + vector cosine similarity
-- Applies dynamic relevance filtering and smart reranking
-- Formats answers in Persian with summary lines
-
----
-
-## 🌟 Features
-
-- 🧠 Intent-aware shopping workflow (via `interpret_query` tool)
-- 🔍 Hybrid search (BM25 + semantic embeddings `multilingual-e5-base`)
-- 🌍 Multilingual support (native Persian/Farsi, English)
-- 📊 Smart reranking with brand score, similarity, discount, price
-- 🎯 Dynamic relevance thresholds (median-based) and top-5 cap
-- 💬 Conversation memory using LangGraph `MemorySaver` and thread IDs
-- ⚡ Fast responses through Elasticsearch vector search
-
----
+- **Persian Language Support**: Full support for Persian shopping queries
+- **Hybrid Search**: Combines BM25 text matching with semantic similarity
+- **Smart Ranking**: Value-based product ranking considering brand scores, prices, and discounts
+- **Intent Detection**: Understands shopping intents (cheapest, best quality, best value, etc.)
+- **Modular Architecture**: Separate MCP servers for each functionality
+- **Observability**: Integrated with Logfire for tracing and logging
 
 ## 🏗️ Architecture
 
-```
-User ➜ LangGraph Agent
-            ├─ interpret_query (LLM → structured intent)
-            └─ search_products_semantic (Elasticsearch + embeddings)
-                                             └─ ProductSearchEngine (singleton)
-                                                   ├─ SentenceTransformer (multilingual-e5-base)
-                                                   ├─ Elasticsearch (BM25 + script_score cosine)
-                                                   └─ BrandScore.json (brand reputation)
-```
+The system uses a distributed MCP (Model Context Protocol) architecture:
 
----
+### MCP Servers
+
+| Server | Port | Description |
+|--------|------|-------------|
+| **embedding-server** | 5003 | Generates multilingual embeddings using intfloat/multilingual-e5-base |
+| **interpret-server** | 5004 | Interprets Persian queries, extracts intent, translates to English |
+| **equip-server** | 5005 | Generates Elasticsearch DSL using EQuIP 3B model |
+| **dsl-processor-server** | 5006 | Transforms English DSL to Persian + adds semantic search |
+| **search-server** | 5002 | Orchestrates search pipeline and executes ES queries |
+
+### Data Flow
+
+1. **User Query** → Agent receives Persian shopping query
+2. **Interpret** → Extracts intent, translates keywords, identifies categories
+3. **EQuIP DSL** → Generates Elasticsearch DSL from structured prompt
+4. **DSL Processing** → Converts English terms to Persian, adds semantic search
+5. **Elasticsearch** → Executes hybrid search (BM25 + vector similarity)
+6. **Ranking** → Applies value-based scoring with brand scores
+7. **Response** → Returns ranked products to user
 
 ## 📁 Project Structure
 
 ```
 ShoppingAiAssistant/
-├── main.py                 # CLI entry point
+├── main.py                      # Main entry point
+├── requirements.txt             # Python dependencies
+├── .env                         # Environment configuration
+├── BrandScore.json              # Brand reputation scores
+├── CategoryW.json               # Category weights
+├── full_category_embeddings.json # Pre-computed category embeddings
+├── test_mcp_servers.py          # Server testing script
 ├── src/
-│   ├── agent.py           # LangGraph agent, tools binding, memory
-│   └── tools/
-│       └── SearchProducts.py  # Search engine + tools (interpret_query, search_products_semantic)
-├── config/
-│   └── .env.example       # Environment template
-├── BrandScore.json        # Precomputed brand scores
-├── CategoryW.json         # Category weights (script reference)
-├── requirements.txt       # Dependencies
-└── DOCUMENTATION.md       # Full technical documentation
+│   ├── agent.py                 # LangGraph agent implementation
+│   ├── logging_config.py        # Centralized Logfire configuration
+│   └── mcp_servers/
+│       ├── run_servers.py       # Server orchestrator
+│       ├── embedding_server.py  # Embedding generation
+│       ├── interpret_server.py  # Query interpretation
+│       ├── equip_server.py      # DSL generation
+│       ├── dsl_processor_server.py # DSL transformation
+│       └── search_server.py     # Search orchestration
+├── script/                      # Utility scripts
+├── config/                      # Configuration files
+└── logs/                        # Server logs
 ```
 
----
+## 📋 Prerequisites
 
-## ⚙️ Setup & Run
+- Python 3.11+
+- Elasticsearch 8.x with shopping products index
+- Ollama (for running EQuIP 3B model)
+- GROQ API key (for LLM agent)
 
-### 1) Install
+## 🚀 Installation
+
+1. **Clone the repository**
+   ```bash
+   git clone https://github.com/11linear11/ShoppingAiAssistant.git
+   cd ShoppingAiAssistant
+   ```
+
+2. **Create virtual environment**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate
+   ```
+
+3. **Install dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Configure environment** - Create a .env file with your settings
+
+## ⚙️ Configuration
+
+Create a .env file:
+
+```env
+# Debug mode
+DEBUG_MODE=true
+
+# Elasticsearch
+ELASTICSEARCH_HOST=your_elasticsearch_host
+ELASTICSEARCH_PORT=9201
+ELASTICSEARCH_INDEX=shopping_products
+
+# EQuIP Model (Ollama via Cloudflare tunnel or local)
+EQUIP_BASE_URL=https://your-tunnel.trycloudflare.com
+EQUIP_MODEL=EQuIP/EQuIP_3B
+
+# LLM for Agent
+GROQ_API_KEY=your_groq_api_key
+
+# Logfire (optional)
+LOGFIRE_TOKEN=your_logfire_token
+```
+
+## 🎯 Usage
+
+### Start all MCP servers
+
 ```bash
-pip install -r requirements.txt
+python src/mcp_servers/run_servers.py
 ```
 
-### 2) Configure environment
-```bash
-cp config/.env.example .env
-# Edit values:
-# DEBUG_MODE=false
-# api_key=your_nvidia_api_key
-# ELASTICSEARCH_HOST=your_host
-# ELASTICSEARCH_PORT=9200
-# ELASTICSEARCH_USER=elastic
-# ELASTICSEARCH_PASSWORD=your_password
-# ELASTICSEARCH_INDEX=shopping_products
-# ELASTICSEARCH_SCHEME=http
-```
+### Run the agent
 
-### 3) Run
 ```bash
 python main.py
 ```
 
-CLI shows:
-```
-Shopping AI Assistant
-==================================================
-Type 'exit' to quit
-```
+### Test servers
 
----
-
-## 🔧 Configuration requirements
-
-Elasticsearch index must include fields:
-- `product_name` (text), `brand_name` (text), `category_name` (text)
-- `price` (float), `discount_price` (float), `has_discount` (boolean), `discount_percentage` (float)
-- `product_embedding` (dense_vector, dims=768, similarity=cosine)
-
----
-
-## ▶️ How it works (end-to-end)
-
-1. User enters a message (Persian or English)
-2. Agent calls `interpret_query` to extract:
-    - `category`, `intent`, `price_sensitivity`, `quality_sensitivity`, `suggested_query`
-3. Agent calls `search_products_semantic` with these parameters
-4. `ProductSearchEngine` runs a hybrid ES search (BM25 + cosine on embeddings)
-5. Products are filtered by dynamic relevance threshold and re-ranked by `value_score`
-6. Agent returns 1–5 top products with Persian formatting and a summary line
-
----
-
-## 🧩 Tools API
-
-### interpret_query(query: str) → JSON string
-Returns structured intent, e.g.:
-```json
-{
-   "category": "لوازم الکترونیکی",
-   "intent": "find_best_value",
-   "price_sensitivity": 0.6,
-   "quality_sensitivity": 0.7,
-   "suggested_query": "هدفون"
-}
+```bash
+python test_mcp_servers.py           # All servers
+python test_mcp_servers.py pipeline  # Full pipeline test
+python test_mcp_servers.py interpret # Interpret server only
 ```
 
-### search_products_semantic(query, quality_sensitivity, price_sensitivity, category, intent) → JSON string
-Returns products and metadata, e.g.:
-```json
-{
-   "products": [{
-      "name": "هدفون سونی",
-      "price": 3500000,
-      "final_price": 3000000,
-      "brand": "Sony",
-      "brand_score": 0.85,
-      "discount": 15,
-      "product_id": "12345",
-      "similarity": 0.87,
-      "value_score": 1.42,
-      "category": "لوازم الکترونیکی"
-   }],
-   "meta": {
-      "query": "هدفون",
-      "total_found": 5,
-      "is_relevant": true,
-      "avg_similarity": 0.75,
-      "price_range": {"min": 1500000, "max": 4500000},
-      "intent": "find_best_value"
-   }
-}
-```
+## 🔧 API Reference
 
----
+### interpret_query
 
-## 🔍 Elasticsearch Mapping (example)
-```json
-{
-   "mappings": {
-      "properties": {
-         "product_id": { "type": "keyword" },
-         "product_name": { "type": "text" },
-         "brand_name": { "type": "text" },
-         "category_name": { "type": "text" },
-         "price": { "type": "float" },
-         "discount_price": { "type": "float" },
-         "discount_percentage": { "type": "float" },
-         "has_discount": { "type": "boolean" },
-         "product_embedding": {
-            "type": "dense_vector",
-            "dims": 768,
-            "index": true,
-            "similarity": "cosine"
-         }
-      }
-   }
-}
-```
+Analyzes user shopping query and returns structured data.
 
----
+**Input:** Persian shopping query
+**Output:**
+- equip_prompt: Structured prompt for DSL generation
+- token_mapping: English to Persian word mappings
+- persian_full_query: Full Persian product description
+- categories_fa: Relevant Persian category names
+- intent: Shopping intent (find_cheapest, find_best_value, etc.)
+- price_sensitivity: 0-1 score
+- quality_sensitivity: 0-1 score
 
-## 🧪 Usage examples
+### search_with_interpretation
 
-- Price-focused: «ارزان‌ترین گوشی رو نشون بده» → `intent = find_cheapest`
-- Quality-focused: «بهترین هدفون با کیفیت عالی» → `intent = find_high_quality`
-- Feature-focused: «یه شامپوی نرم‌کننده میخوام» → `intent = find_by_feature`
-- Implicit need: «سردمه» → `suggested_query = کاپشن`
-- Compare: «چند تا گوشی از برندهای مختلف نشون بده» → `intent = compare`
+Searches products using interpretation results.
 
----
+**Input:** All outputs from interpret_query
+**Output:** Ranked products with scores
 
-## 🛠️ Troubleshooting
+## 📊 Shopping Intents
 
-- No results: verify index exists and fields; relax category filter; set `DEBUG_MODE=true` to inspect logs
-- ES connection errors: check `.env` host/port/user/password; test connectivity
-- LLM empty response: try `MODEL_NAME=meta/llama-3.1-70b-instruct`; verify `api_key`
-- Slow first run: model loading is one-time; subsequent queries should be fast (< 400ms)
-
----
-
-## ⚡ Performance Notes
-
-- Singleton ES client and embedding model for warm performance
-- Dynamic similarity thresholds (median-based) balance precision/recall
-- Reranking leverages `BrandScore.json` for brand reputation
-
----
-
-## 📝 License
-
-MIT. See `LICENSE`.
-
----
-
-## 📎 More
-
-For deep technical details (architecture diagrams, formulas, benchmarks, advanced config), see **`DOCUMENTATION.md`**.
-
-Last updated: Nov 26, 2025
-2. Verify index exists: `GET /shopping_products/_count`
-3. Enable debug mode: `DEBUG_MODE=true`
-
-### Slow Performance?
-1. First run is slow (model loading ~3s) - normal
-2. Subsequent queries should be <400ms
-3. Check Elasticsearch performance
-
-### LLM Errors?
-1. Verify API key is valid
-2. Try different model: `MODEL_NAME=meta/llama-3.1-70b-instruct`
-3. Check internet connection
-
----
-
-## 📊 Tech Stack
-
-- **LangGraph 1.0.2**: Conversation orchestration
-- **Elasticsearch 9.2.0**: Vector search
-- **multilingual-e5-base**: Semantic embeddings (768-dim)
-- **NVIDIA LLama 3.1 70B**: LLM
-
----
-
-## 📁 Project Structure
-
-```
-ShoppingAiAssistant/
-├── main.py                    # Entry point
-├── src/
-│   ├── agent.py              # LangGraph agent
-│   └── tools/
-│       └── SearchProducts.py # Search engine
-├── config/
-│   └── .env.example          # Config template
-├── BrandScore.json           # Brand scores
-└── requirements.txt          # Dependencies
-```
-
----
-
-## 🎯 How It Works (Simplified)
-
-1. **User sends query**: "یه هدفون ارزان میخوام"
-
-2. **Agent calls interpret_query**:
-   ```json
-   {
-     "category": "لوازم الکترونیکی",
-     "intent": "find_cheapest",
-     "suggested_query": "هدفون"
-   }
-   ```
-
-3. **Agent calls search_products_semantic**:
-   - Generates embedding for "هدفون"
-   - Searches Elasticsearch (hybrid: BM25 + Vector)
-   - Gets 50 candidates
-
-4. **Reranking**:
-   - Calculates value_score for each
-   - Filters by relevance (similarity ≥ 0.4)
-   - Sorts by value_score
-   - Returns top 5
-
-5. **Agent formats response**:
-   ```
-   🛒 هدفون JBL Tune 500BT
-      💰 قیمت: 850,000 تومان
-      🏷️ برند: JBL
-      🔥 تخفیف: 10%
-   ```
-
----
-
-## 🔍 Value Score Formula
-
-**Default:**
-```python
-value_score = (
-    brand_score × quality_sensitivity +
-    similarity × 0.4 +
-    discount × 0.2 -
-    normalized_price × price_sensitivity
-)
-```
-
-**Adjusts based on intent:**
-- `find_cheapest`: Price weight = 2.0
-- `find_high_quality`: Brand weight = 1.5
-- `find_by_feature`: Similarity weight = 1.5
-
----
-
-## 📖 Full Documentation
-
-For comprehensive details, see:
-- **[DOCUMENTATION.md](DOCUMENTATION.md)** - Complete technical documentation (1800+ lines)
-
-Covers:
-- Detailed architecture diagrams
-- API reference
-- Performance optimization
-- Advanced features
-- Contributing guidelines
-- Troubleshooting guide
-- Future enhancements
-
----
+| Intent | Description |
+|--------|-------------|
+| find_cheapest | User wants the lowest price |
+| find_best_value | Balance between price and quality |
+| find_high_quality | User prioritizes quality over price |
+| find_by_feature | Searching for specific features |
+| compare | Comparing multiple products |
 
 ## 🤝 Contributing
 
 1. Fork the repository
-2. Create feature branch: `git checkout -b feature/name`
-3. Commit changes: `git commit -m 'Add feature'`
-4. Push: `git push origin feature/name`
-5. Open Pull Request
+2. Create a feature branch
+3. Make your changes
+4. Submit a pull request
 
----
+## 📄 License
 
-## 📞 Support
+MIT License - see LICENSE file for details.
 
-- **GitHub Issues**: [Create issue](https://github.com/11linear11/ShoppingAiAssistant/issues)
-- **Full Docs**: [DOCUMENTATION.md](DOCUMENTATION.md)
+## 👤 Author
 
----
-
-**Version**: 1.0.0  
-**Last Updated**: November 25, 2025  
-**License**: MIT
+Created by [11linear11](https://github.com/11linear11)

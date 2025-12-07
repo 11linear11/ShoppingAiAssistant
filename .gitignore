@@ -73,5 +73,20 @@ Thumbs.db
 *.tmp
 *.bak
 *.swp
+*.backup*
 temp/
 tmp/
+
+# Project specific
+config/secrets.json
+*.backup
+agent_debug.log
+search_products_debug.log
+mcp_server.log
+
+# Large data files
+full_category_embeddings.json
+export-product-list.csv
+
+# Logfire cache
+.logfire/
