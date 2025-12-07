@@ -91,27 +91,156 @@ ShoppingAiAssistant/
 
 ## ⚙️ Configuration
 
-Create a .env file:
+Copy the example environment file and configure:
+
+```bash
+cp config/.env.example .env
+```
+
+### Environment Variables
 
 ```env
-# Debug mode
-DEBUG_MODE=true
+# ============================================
+# 🔧 GENERAL SETTINGS
+# ============================================
+DEBUG_MODE=false
 
-# Elasticsearch
-ELASTICSEARCH_HOST=your_elasticsearch_host
-ELASTICSEARCH_PORT=9201
-ELASTICSEARCH_INDEX=shopping_products
+# ============================================
+# 🤖 AI/LLM PROVIDERS
+# ============================================
 
-# EQuIP Model (Ollama via Cloudflare tunnel or local)
-EQUIP_BASE_URL=https://your-tunnel.trycloudflare.com
+# Groq API (Main Agent LLM)
+GROQ_API_KEY=your_groq_api_key_here
+GROQ_MODEL=llama-3.3-70b-versatile
+
+# NVIDIA API (Interpret Server - Query Understanding)
+NVIDIA_API_KEY=your_nvidia_api_key_here
+NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
+NVIDIA_MODEL=nvidia/llama-3.1-nemotron-70b-instruct
+
+# EQuIP 3B (DSL Generation - Cloudflare Tunnel)
+# ⚠️ This URL changes with each Colab restart!
+EQUIP_BASE_URL=https://your-cloudflare-tunnel.trycloudflare.com
 EQUIP_MODEL=EQuIP/EQuIP_3B
 
-# LLM for Agent
-GROQ_API_KEY=your_groq_api_key
+# ============================================
+# 🔍 ELASTICSEARCH
+# ============================================
+ELASTICSEARCH_HOST=your_elasticsearch_host
+ELASTICSEARCH_PORT=9201
+ELASTICSEARCH_SCHEME=http
+ELASTICSEARCH_USER=elastic
+ELASTICSEARCH_PASSWORD=your_elasticsearch_password
+ELASTICSEARCH_INDEX=shopping_products
 
-# Logfire (optional)
-LOGFIRE_TOKEN=your_logfire_token
+# ============================================
+# 🌐 MCP SERVERS (Internal URLs)
+# ============================================
+MCP_SEARCH_URL=http://localhost:5002
+MCP_EMBEDDING_URL=http://localhost:5003
+MCP_INTERPRET_URL=http://localhost:5004
+MCP_EQUIP_URL=http://localhost:5005
+MCP_DSL_PROCESSOR_URL=http://localhost:5006
+
+# ============================================
+# 📊 LOGGING & MONITORING
+# ============================================
+LOGFIRE_TOKEN=your_logfire_token_here
+LOGFIRE_SERVICE_NAME=shopping-assistant
+SEND_TO_LOGFIRE=if-token-present
+
+# ============================================
+# 🔐 OPTIONAL API KEYS
+# ============================================
+HUGGINGFACEHUB_API_TOKEN=your_huggingface_token_here
+GITHUB_TOKEN=your_github_token_here
 ```
+
+## 🔄 Pipeline Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              USER QUERY                                      │
+│                        "دوغ ارزان میخوام"                                   │
+└─────────────────────────────────┬───────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         🤖 AGENT (LangGraph)                                 │
+│                     Port: N/A (Main Process)                                │
+│  • Uses Groq LLM (llama-3.3-70b-versatile)                                  │
+│  • Orchestrates tools: interpret_query → search_with_interpretation         │
+└─────────────────────────────────┬───────────────────────────────────────────┘
+                                  │
+              ┌───────────────────┴───────────────────┐
+              │                                       │
+              ▼                                       ▼
+┌─────────────────────────────┐         ┌─────────────────────────────────────┐
+│  📝 INTERPRET SERVER        │         │      🔍 SEARCH SERVER               │
+│  Port: 5004                 │         │      Port: 5002                     │
+│                             │         │                                     │
+│  • NVIDIA LLM               │         │  Orchestrates internally:           │
+│  • Query understanding      │         │  ┌─────────────────────────────┐   │
+│  • Intent detection         │         │  │ 🧠 EQUIP SERVER (5005)     │   │
+│  • English translation      │         │  │ • EQuIP 3B via Cloudflare  │   │
+│  • Category extraction      │         │  │ • Generates ES DSL         │   │
+│                             │         │  └──────────────┬──────────────┘   │
+│  Calls embedding server     │         │                 │                   │
+│  for category matching      │         │                 ▼                   │
+└──────────────┬──────────────┘         │  ┌─────────────────────────────┐   │
+               │                         │  │ 🔄 DSL PROCESSOR (5006)    │   │
+               │                         │  │ • English → Persian        │   │
+               │                         │  │ • Adds semantic search     │   │
+               │                         │  │ • Adds hybrid scoring      │   │
+               │                         │  └──────────────┬──────────────┘   │
+               │                         │                 │                   │
+               │                         │                 ▼                   │
+               │                         │  ┌─────────────────────────────┐   │
+               │                         │  │ 🔎 ELASTICSEARCH           │   │
+               │                         │  │ • Executes hybrid query    │   │
+               │                         │  │ • BM25 + Vector similarity │   │
+               │                         │  └──────────────┬──────────────┘   │
+               │                         │                 │                   │
+               │                         │                 ▼                   │
+               │                         │  ┌─────────────────────────────┐   │
+               │                         │  │ 📊 VALUE RANKING           │   │
+               │                         │  │ • Brand scores             │   │
+               │                         │  │ • Price normalization      │   │
+               │                         │  │ • Discount consideration   │   │
+               │                         │  └─────────────────────────────┘   │
+               │                         │                                     │
+               ▼                         └─────────────────┬───────────────────┘
+┌─────────────────────────────┐                           │
+│  🔢 EMBEDDING SERVER        │                           │
+│  Port: 5003                 │◄──────────────────────────┤
+│                             │                           │
+│  • multilingual-e5-base     │                           │
+│  • 768-dim embeddings       │                           │
+│  • Category matching        │                           │
+└─────────────────────────────┘                           │
+                                                          ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           📦 RANKED PRODUCTS                                 │
+│                                                                              │
+│  [                                                                           │
+│    {"name": "دوغ عالیس", "price": 15000, "score": 0.92},                    │
+│    {"name": "دوغ میهن", "price": 18000, "score": 0.87},                     │
+│    ...                                                                       │
+│  ]                                                                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Pipeline Steps
+
+| Step | Server | Action |
+|------|--------|--------|
+| 1 | Agent | Receives user query |
+| 2 | Interpret (5004) | Extracts intent, translates, finds categories |
+| 3 | EQuIP (5005) | Generates Elasticsearch DSL query |
+| 4 | DSL Processor (5006) | Converts English→Persian, adds embeddings |
+| 5 | Embedding (5003) | Generates vector for semantic search |
+| 6 | Search (5002) | Executes query, applies value ranking |
+| 7 | Agent | Returns formatted results to user |
 
 ## 🎯 Usage
 
