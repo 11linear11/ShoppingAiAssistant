@@ -35,9 +35,9 @@ load_dotenv()
 # ═══════════════════════════════════════════════════════════════
 SERVER_NAME = "search-server"
 SERVER_PORT = 5002
-EMBEDDING_SERVER_URL = "http://localhost:5003"
-EQUIP_SERVER_URL = "http://localhost:5005"
-DSL_PROCESSOR_URL = "http://localhost:5006"
+EMBEDDING_SERVER_URL = os.getenv("MCP_EMBEDDING_URL", "http://localhost:5003")
+EQUIP_SERVER_URL = os.getenv("MCP_EQUIP_URL", "http://localhost:5005")
+DSL_PROCESSOR_URL = os.getenv("MCP_DSL_PROCESSOR_URL", "http://localhost:5006")
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 
 # Path to brand scores

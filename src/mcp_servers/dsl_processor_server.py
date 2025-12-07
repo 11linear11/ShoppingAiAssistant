@@ -34,7 +34,7 @@ load_dotenv()
 # ═══════════════════════════════════════════════════════════════
 SERVER_NAME = "dsl-processor-server"
 SERVER_PORT = 5006
-EMBEDDING_SERVER_URL = "http://localhost:5003"
+EMBEDDING_SERVER_URL = os.getenv("MCP_EMBEDDING_URL", "http://localhost:5003")
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 
 # ═══════════════════════════════════════════════════════════════
