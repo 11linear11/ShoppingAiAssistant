@@ -1,41 +1,41 @@
 # 📋 TODO List - Shopping AI Assistant
 
-> تاریخ آخرین بروزرسانی: 19 دسامبر 2025
+> Last Updated: December 19, 2025
 
 ---
 
-## 🔴 **CRITICAL - فوری (این هفته)**
+## 🔴 **CRITICAL - Urgent (This Week)**
 
-### امنیت
-- [ ] **مخفی کردن IP و اطلاعات حساس Elasticsearch**
-  - جابجایی به `.env`
-  - استفاده از Private Network یا VPN
-  - محدودسازی دسترسی با Firewall
-  - فایل: `config/.env.example`
+### Security
+- [ ] **Hide Elasticsearch IP and sensitive credentials**
+  - Move to `.env` file
+  - Use Private Network or VPN
+  - Restrict access with Firewall
+  - File: `config/.env.example`
 
-- [ ] **پیاده‌سازی Authentication برای MCP Servers**
-  - اضافه کردن API Key middleware
-  - JWT Token برای Agent
-  - فایل‌ها: `src/mcp_servers/*.py`
+- [ ] **Implement Authentication for MCP Servers**
+  - Add API Key middleware
+  - JWT Token for Agent
+  - Files: `src/mcp_servers/*.py`
 
-- [ ] **اضافه کردن Rate Limiting**
-  - استفاده از `slowapi`
-  - 10 request/minute per IP
-  - فایل‌ها: `src/mcp_servers/*.py`
+- [ ] **Add Rate Limiting**
+  - Use `slowapi`
+  - 10 requests/minute per IP
+  - Files: `src/mcp_servers/*.py`
 
 ### Pipeline Performance
-- [ ] **اضافه کردن Redis Cache برای Embeddings**
+- [ ] **Add Redis Cache for Embeddings**
   ```python
   # src/mcp_servers/embedding_server.py
-  - استفاده از Redis
+  - Use Redis
   - TTL: 3600 seconds
   - Cache key: f"emb:{hash(text)}"
   ```
-  - فایل: `src/mcp_servers/embedding_server.py`
+  - File: `src/mcp_servers/embedding_server.py`
 
-- [ ] **کاهش Timeout EQuIP از 120s به 10s**
-  - فایل: `src/mcp_servers/equip_server.py`, line 108
-  - تغییر `timeout=120` به `timeout=10`
+- [ ] **Reduce EQuIP Timeout from 120s to 10s**
+  - File: `src/mcp_servers/equip_server.py`, line 108
+  - Change `timeout=120` to `timeout=10`
 
 - [ ] **Fix Token Mapping Fallback**
   ```python
@@ -43,14 +43,14 @@
   if not token_mapping or len(token_mapping) == 0:
       token_mapping = auto_extract_tokens(equip_prompt, persian_full_query)
   ```
-  - فایل: `src/mcp_servers/interpret_server.py`
+  - File: `src/mcp_servers/interpret_server.py`
 
-- [ ] **Fix Category Filter - اطمینان از اضافه شدن**
-  - فایل: `src/mcp_servers/dsl_processor_server.py`
-  - متد: `_fix_category_filters` → تغییر به `_ensure_category_filters`
+- [ ] **Fix Category Filter - Ensure it's added**
+  - File: `src/mcp_servers/dsl_processor_server.py`
+  - Method: `_fix_category_filters` → Change to `_ensure_category_filters`
 
 ### Testing
-- [ ] **ایجاد Unit Tests**
+- [ ] **Create Unit Tests**
   ```bash
   tests/
     unit/
@@ -61,7 +61,7 @@
       test_embedding_service.py
   ```
 
-- [ ] **ایجاد Integration Tests**
+- [ ] **Create Integration Tests**
   ```bash
   tests/
     integration/
@@ -69,7 +69,7 @@
       test_agent_flow.py
   ```
 
-- [ ] **اضافه کردن pytest و coverage**
+- [ ] **Add pytest and coverage**
   ```bash
   pip install pytest pytest-asyncio pytest-cov
   pytest tests/ --cov=src --cov-report=html
@@ -77,12 +77,12 @@
 
 ---
 
-## 🟡 **MAJOR - کوتاه‌مدت (1-2 هفته)**
+## 🟡 **MAJOR - Short-term (1-2 Weeks)**
 
 ### Architecture
-- [ ] **Refactor SearchService - تقسیم به کلاس‌های کوچک‌تر**
+- [ ] **Refactor SearchService - Split into smaller classes**
   ```python
-  # ایجاد:
+  # Create:
   src/services/
     embedding_client.py
     elasticsearch_client.py
@@ -91,7 +91,7 @@
     search_orchestrator.py
   ```
 
-- [ ] **پیاده‌سازی Retry Logic با Tenacity**
+- [ ] **Implement Retry Logic with Tenacity**
   ```python
   from tenacity import retry, stop_after_attempt, wait_exponential
   
@@ -99,9 +99,9 @@
   async def call_mcp_tool_with_retry(...):
       ...
   ```
-  - فایل‌ها: `src/agent.py`, `src/mcp_servers/search_server.py`
+  - Files: `src/agent.py`, `src/mcp_servers/search_server.py`
 
-- [ ] **پیاده‌سازی Circuit Breaker**
+- [ ] **Implement Circuit Breaker**
   ```python
   from pybreaker import CircuitBreaker
   
@@ -112,7 +112,7 @@
       ...
   ```
 
-- [ ] **اضافه کردن Health Check Endpoints**
+- [ ] **Add Health Check Endpoints**
   ```python
   @app.get("/health")
   async def health():
@@ -125,10 +125,10 @@
           }
       }
   ```
-  - فایل‌ها: همه `src/mcp_servers/*.py`
+  - Files: All `src/mcp_servers/*.py`
 
 ### Pipeline Optimization
-- [ ] **Parallel Processing در Interpret Stage**
+- [ ] **Parallel Processing in Interpret Stage**
   ```python
   # src/mcp_servers/interpret_server.py
   interpret_task, category_task = await asyncio.gather(
@@ -137,7 +137,7 @@
   )
   ```
 
-- [ ] **Graceful Degradation برای EQuIP**
+- [ ] **Graceful Degradation for EQuIP**
   ```python
   # src/mcp_servers/search_server.py
   try:
@@ -150,15 +150,15 @@
       dsl = create_simple_dsl(...)
   ```
 
-- [ ] **بهبود Score Normalization**
+- [ ] **Improve Score Normalization**
   ```python
   # src/mcp_servers/search_server.py
-  # استفاده از Min-Max Normalization به جای /5.0
+  # Use Min-Max Normalization instead of /5.0
   scores = [hit['_score'] for hit in hits]
   normalized = (score - min(scores)) / (max(scores) - min(scores))
   ```
 
-- [ ] **Query Result Caching با Redis**
+- [ ] **Query Result Caching with Redis**
   ```python
   cache_key = f"search:{query_hash}:{categories}"
   cached = await redis.get(cache_key)
@@ -167,7 +167,7 @@
   ```
 
 ### Configuration
-- [ ] **استفاده از Pydantic Settings**
+- [ ] **Use Pydantic Settings**
   ```python
   # src/config/settings.py
   from pydantic_settings import BaseSettings
@@ -181,7 +181,7 @@
           env_file = '.env'
   ```
 
-- [ ] **ایجاد config.yaml**
+- [ ] **Create config.yaml**
   ```yaml
   servers:
     embedding:
@@ -193,7 +193,7 @@
   ```
 
 ### DevOps
-- [ ] **ایجاد Docker Compose**
+- [ ] **Create Docker Compose**
   ```yaml
   # docker-compose.yml
   services:
@@ -206,7 +206,7 @@
       command: python src/mcp_servers/embedding_server.py
   ```
 
-- [ ] **ایجاد Dockerfile**
+- [ ] **Create Dockerfile**
   ```dockerfile
   FROM python:3.11-slim
   WORKDIR /app
@@ -216,7 +216,7 @@
   CMD ["python", "main.py"]
   ```
 
-- [ ] **Setup CI/CD با GitHub Actions**
+- [ ] **Setup CI/CD with GitHub Actions**
   ```yaml
   # .github/workflows/test.yml
   name: Tests
@@ -232,42 +232,42 @@
 
 ---
 
-## 🟢 **MINOR - میان‌مدت (1 ماه)**
+## 🟢 **MINOR - Mid-term (1 Month)**
 
 ### Code Quality
-- [ ] **اضافه کردن Type Hints کامل**
-  - همه فایل‌های `src/`
-  - استفاده از `mypy` برای type checking
+- [ ] **Add Complete Type Hints**
+  - All files in `src/`
+  - Use `mypy` for type checking
 
 - [ ] **Fix Duplicate Code**
-  - تابع `call_mcp_tool` در 3 فایل تکرار شده
-  - ایجاد `src/utils/mcp_client.py`
+  - `call_mcp_tool` function duplicated in 3 files
+  - Create `src/utils/mcp_client.py`
 
-- [ ] **حذف Magic Numbers**
+- [ ] **Remove Magic Numbers**
   ```python
-  # قبل:
+  # Before:
   similarity = min(1.0, score / 5.0)
   
-  # بعد:
+  # After:
   SIMILARITY_NORMALIZATION_FACTOR = 5.0
   similarity = min(1.0, score / SIMILARITY_NORMALIZATION_FACTOR)
   ```
 
-- [ ] **بهبود Error Messages**
+- [ ] **Improve Error Messages**
   ```python
-  # قبل:
+  # Before:
   except Exception as e:
-      print(f"خطا: {str(e)}")
+      print(f"Error: {str(e)}")
   
-  # بعد:
+  # After:
   except ConnectionError as e:
-      logger.error("خطا در اتصال به سرور جستجو. لطفاً دوباره تلاش کنید.")
+      logger.error("Connection error to search server. Please try again.")
   except ValueError as e:
-      logger.error("ورودی نامعتبر است. لطفاً جستجوی خود را اصلاح کنید.")
+      logger.error("Invalid input. Please correct your query.")
   ```
 
 ### Monitoring & Observability
-- [ ] **اضافه کردن Prometheus Metrics**
+- [ ] **Add Prometheus Metrics**
   ```python
   from prometheus_client import Counter, Histogram
   
@@ -286,7 +286,7 @@
   - Error Rate
   - Cache Hit Rate
 
-- [ ] **بهبود Structured Logging**
+- [ ] **Improve Structured Logging**
   ```python
   logger.info("Search completed", extra={
       "query": query,
@@ -297,7 +297,7 @@
   ```
 
 ### Performance
-- [ ] **پیاده‌سازی Connection Pooling**
+- [ ] **Implement Connection Pooling**
   ```python
   # src/mcp_servers/search_server.py
   app.state.http_client = aiohttp.ClientSession()  # Reuse
@@ -312,11 +312,11 @@
   ```
 
 - [ ] **Database Query Optimization**
-  - بررسی ES query performance
-  - اضافه کردن indexes مناسب
+  - Review ES query performance
+  - Add appropriate indexes
 
 ### Data Validation
-- [ ] **استفاده از Pydantic Models**
+- [ ] **Use Pydantic Models**
   ```python
   # src/models/search.py
   from pydantic import BaseModel, validator
@@ -332,7 +332,7 @@
           return v
   ```
 
-- [ ] **JSON Schema Validation برای DSL**
+- [ ] **JSON Schema Validation for DSL**
   ```python
   from jsonschema import validate
   
@@ -346,9 +346,9 @@
   ```
 
 ### Documentation
-- [ ] **API Documentation با Swagger/OpenAPI**
-  - استفاده از FastAPI's built-in docs
-  - مستندسازی تمام endpoints
+- [ ] **API Documentation with Swagger/OpenAPI**
+  - Use FastAPI's built-in docs
+  - Document all endpoints
 
 - [ ] **Architecture Decision Records (ADR)**
   ```markdown
@@ -366,30 +366,30 @@
   - Empty results
   ```
 
-- [ ] **اضافه کردن کامنت‌های Docstring**
-  - همه توابع public
-  - format: Google style
+- [ ] **Add Docstring Comments**
+  - All public functions
+  - Format: Google style
 
 ---
 
-## 🔵 **NICE TO HAVE - بلندمدت (3+ ماه)**
+## 🔵 **NICE TO HAVE - Long-term (3+ Months)**
 
 ### Advanced Features
-- [ ] **پیاده‌سازی API Gateway**
-  - Kong یا Nginx
+- [ ] **Implement API Gateway**
+  - Kong or Nginx
   - Centralized authentication
   - Load balancing
 
 - [ ] **Service Discovery**
-  - Consul یا etcd
+  - Consul or etcd
   - Dynamic service registration
 
 - [ ] **Event-Driven Architecture**
-  - RabbitMQ یا Kafka
+  - RabbitMQ or Kafka
   - Async message processing
 
 - [ ] **CQRS Pattern**
-  - جداسازی Command و Query
+  - Separate Command and Query
   - Event Sourcing
 
 ### Scalability
@@ -428,20 +428,20 @@
 
 ### ML/AI
 - [ ] **A/B Testing Framework**
-  - تست فرمول‌های مختلف value_score
-  - تست مدل‌های embedding مختلف
+  - Test different value_score formulas
+  - Test different embedding models
 
 - [ ] **Model Monitoring**
   - Embedding drift detection
   - Query quality metrics
 
 - [ ] **Fine-tune Models**
-  - Fine-tune embedding model روی داده‌های فارسی
-  - Fine-tune EQuIP روی DSL های واقعی
+  - Fine-tune embedding model on Persian data
+  - Fine-tune EQuIP on real DSL queries
 
 ### User Features
 - [ ] **Multi-tenancy Support**
-  - جداسازی داده‌های کاربران
+  - Isolate user data
   - Tenant-specific configs
 
 - [ ] **Personalization**
@@ -456,48 +456,48 @@
 
 ---
 
-## 📊 **پیشرفت کلی**
+## 📊 **Overall Progress**
 
 ```
-امنیت:           [░░░░░░░░░░] 0%   (0/3 تکمیل)
-Performance:     [░░░░░░░░░░] 0%   (0/4 تکمیل)
-Testing:         [░░░░░░░░░░] 0%   (0/3 تکمیل)
-Architecture:    [░░░░░░░░░░] 0%   (0/4 تکمیل)
-Pipeline:        [░░░░░░░░░░] 0%   (0/4 تکمیل)
-Configuration:   [░░░░░░░░░░] 0%   (0/2 تکمیل)
-DevOps:          [░░░░░░░░░░] 0%   (0/3 تکمیل)
-Code Quality:    [░░░░░░░░░░] 0%   (0/4 تکمیل)
-Monitoring:      [░░░░░░░░░░] 0%   (0/3 تکمیل)
-Documentation:   [░░░░░░░░░░] 0%   (0/4 تکمیل)
+Security:         [░░░░░░░░░░] 0%   (0/3 completed)
+Performance:      [░░░░░░░░░░] 0%   (0/4 completed)
+Testing:          [░░░░░░░░░░] 0%   (0/3 completed)
+Architecture:     [░░░░░░░░░░] 0%   (0/4 completed)
+Pipeline:         [░░░░░░░░░░] 0%   (0/4 completed)
+Configuration:    [░░░░░░░░░░] 0%   (0/2 completed)
+DevOps:           [░░░░░░░░░░] 0%   (0/3 completed)
+Code Quality:     [░░░░░░░░░░] 0%   (0/4 completed)
+Monitoring:       [░░░░░░░░░░] 0%   (0/3 completed)
+Documentation:    [░░░░░░░░░░] 0%   (0/4 completed)
 
-کل پیشرفت:      [░░░░░░░░░░] 0%   (0/38 تکمیل)
+Total Progress:   [░░░░░░░░░░] 0%   (0/38 completed)
 ```
 
 ---
 
-## 🎯 **اولویت‌بندی هفته به هفته**
+## 🎯 **Week-by-Week Priorities**
 
-### هفته 1
+### Week 1
 - [ ] Redis Cache
 - [ ] Fix Timeout
 - [ ] Token Mapping Fallback
 - [ ] Category Filter Fix
 - [ ] Unit Tests (basic)
 
-### هفته 2
+### Week 2
 - [ ] Authentication
 - [ ] Rate Limiting
 - [ ] Health Checks
 - [ ] Retry Logic
 - [ ] Integration Tests
 
-### هفته 3
+### Week 3
 - [ ] Refactor SearchService
 - [ ] Parallel Processing
 - [ ] Graceful Degradation
 - [ ] Docker Compose
 
-### هفته 4
+### Week 4
 - [ ] CI/CD Setup
 - [ ] Pydantic Settings
 - [ ] Connection Pooling
@@ -505,36 +505,36 @@ Documentation:   [░░░░░░░░░░] 0%   (0/4 تکمیل)
 
 ---
 
-## 📝 **نکات مهم**
+## 📝 **Important Notes**
 
-### برای شروع سریع:
+### Quick Start:
 ```bash
-# 1. نصب dependencies جدید
+# 1. Install new dependencies
 pip install redis tenacity pybreaker pydantic-settings pytest pytest-asyncio
 
-# 2. راه‌اندازی Redis
+# 2. Start Redis
 docker run -d -p 6379:6379 redis:alpine
 
-# 3. اجرای تست‌ها
+# 3. Run tests
 pytest tests/ -v
 
-# 4. چک کردن coverage
+# 4. Check coverage
 pytest tests/ --cov=src --cov-report=html
 ```
 
-### چک‌لیست قبل از Production:
-- [ ] تمام تست‌ها Pass می‌شوند
-- [ ] Coverage بالای 80%
+### Pre-Production Checklist:
+- [ ] All tests pass
+- [ ] Coverage above 80%
 - [ ] Security scan (bandit, safety)
 - [ ] Load testing (Locust)
-- [ ] Documentation کامل است
-- [ ] Monitoring setup شده
-- [ ] Backup strategy تعریف شده
-- [ ] Rollback plan آماده است
+- [ ] Documentation complete
+- [ ] Monitoring setup
+- [ ] Backup strategy defined
+- [ ] Rollback plan ready
 
 ---
 
-## 🔗 **منابع مفید**
+## 🔗 **Useful Resources**
 
 - [FastAPI Best Practices](https://fastapi.tiangolo.com/tutorial/)
 - [Pytest Documentation](https://docs.pytest.org/)
@@ -545,10 +545,10 @@ pytest tests/ --cov=src --cov-report=html
 
 ---
 
-**یادآوری:** این TODO list زنده است و باید با پیشرفت پروژه به‌روزرسانی شود.
+**Reminder:** This TODO list is a living document and should be updated as the project progresses.
 
 ```bash
-# برای آپدیت کردن پیشرفت:
-# هر وقت یک task تکمیل شد، علامت [x] بزنید
-# مثال: - [x] Task completed
+# To update progress:
+# When a task is completed, mark it with [x]
+# Example: - [x] Task completed
 ```
