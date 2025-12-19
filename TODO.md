@@ -37,7 +37,7 @@
   - File: `src/mcp_servers/equip_server.py`, line 108
   - Change `timeout=120` to `timeout=10`
 
-- [ ] **Fix Token Mapping Fallback**
+-  **Fix Token Mapping Fallback**
   ```python
   # src/mcp_servers/interpret_server.py
   if not token_mapping or len(token_mapping) == 0:
@@ -280,7 +280,7 @@
       ...
   ```
 
-- [ ] **Setup Grafana Dashboard**
+-  **Setup Grafana Dashboard**
   - Query Rate
   - Latency (p50, p95, p99)
   - Error Rate
@@ -303,7 +303,7 @@
   app.state.http_client = aiohttp.ClientSession()  # Reuse
   ```
 
-- [ ] **Batch Embedding Processing**
+-  **Batch Embedding Processing**
   ```python
   embeddings = await get_embeddings_batch([
       persian_full_query,
@@ -350,7 +350,7 @@
   - Use FastAPI's built-in docs
   - Document all endpoints
 
-- [ ] **Architecture Decision Records (ADR)**
+-  **Architecture Decision Records (ADR)**
   ```markdown
   docs/adr/
     0001-use-mcp-protocol.md
@@ -358,7 +358,7 @@
     0003-use-equip-for-dsl.md
   ```
 
-- [ ] **Troubleshooting Guide**
+-  **Troubleshooting Guide**
   ```markdown
   docs/troubleshooting.md
   - EQuIP connection issues
@@ -393,7 +393,7 @@
   - Event Sourcing
 
 ### Scalability
-- [ ] **Kubernetes Deployment**
+-  **Kubernetes Deployment**
   ```yaml
   # k8s/deployment.yml
   apiVersion: apps/v1
@@ -404,7 +404,7 @@
     replicas: 3
   ```
 
-- [ ] **Horizontal Pod Autoscaling**
+-  **Horizontal Pod Autoscaling**
   ```yaml
   apiVersion: autoscaling/v2
   kind: HorizontalPodAutoscaler
@@ -422,7 +422,7 @@
           averageUtilization: 70
   ```
 
-- [ ] **Multi-region Deployment**
+-  **Multi-region Deployment**
   - Active-Active setup
   - Global Load Balancer
 
@@ -431,7 +431,7 @@
   - Test different value_score formulas
   - Test different embedding models
 
-- [ ] **Model Monitoring**
+-  **Model Monitoring**
   - Embedding drift detection
   - Query quality metrics
 
@@ -444,12 +444,12 @@
   - Isolate user data
   - Tenant-specific configs
 
-- [ ] **Personalization**
+-  **Personalization**
   - User preferences
   - Search history
   - Recommendations
 
-- [ ] **Advanced Filters**
+-  **Advanced Filters**
   - Price range slider
   - Brand selection
   - Color/Size filters
