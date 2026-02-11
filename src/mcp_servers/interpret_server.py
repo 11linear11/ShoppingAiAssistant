@@ -8,6 +8,7 @@ Uses LangChain with GitHub Models API (Llama-3.3-70B-Instruct) for classificatio
 This is the MCP protocol version using FastMCP SDK.
 """
 
+import asyncio
 import json
 import re
 import sys
@@ -76,6 +77,11 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+# Shared singleton across HTTP sessions to avoid re-loading heavy models.
+_shared_interpreter: Optional["QueryInterpreter"] = None
+_shared_interpreter_lock = asyncio.Lock()
 
 
 # ============================================================================
@@ -564,20 +570,26 @@ class AppContext:
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     """Manage application lifecycle."""
-    llm_client = LangChainLLM()
-    interpreter = QueryInterpreter(llm_client)
+    global _shared_interpreter
 
-    await interpreter.load_category_embeddings()
-
-    log_interpret("Interpret server started", {"model": settings.github_model})
-    if settings.debug_mode:
-        log_interpret("DEBUG mode active")
+    if _shared_interpreter is None:
+        async with _shared_interpreter_lock:
+            if _shared_interpreter is None:
+                llm_client = LangChainLLM()
+                interpreter = QueryInterpreter(llm_client)
+                await interpreter.load_category_embeddings()
+                _shared_interpreter = interpreter
+                log_interpret("Interpret server started", {"model": settings.github_model})
+                if settings.debug_mode:
+                    log_interpret("DEBUG mode active")
+    else:
+        log_interpret("Interpret server warm instance reused", {"model": settings.github_model})
 
     try:
-        yield AppContext(interpreter=interpreter)
+        yield AppContext(interpreter=_shared_interpreter)
     finally:
-        await interpreter.close()
-        log_interpret("Interpret server shutting down")
+        # Keep warm singleton alive across sessions/process lifespan.
+        pass
 
 
 # Create MCP server

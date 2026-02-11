@@ -59,7 +59,9 @@ class MCPClient:
     
     async def _ensure_initialized(self):
         """Ensure MCP session is initialized. Retries if server isn't ready."""
-        if self._initialized and self._session_id:
+        # Some MCP deployments run in stateless mode and do not return mcp-session-id.
+        # In that case, a successful initialize should still be reused.
+        if self._initialized:
             return
         
         # Reset state for fresh initialization
@@ -110,7 +112,10 @@ class MCPClient:
                 
                 if response.status_code == 200:
                     self._initialized = True
-                    logger.info(f"MCP session initialized: {self._session_id}")
+                    if self._session_id:
+                        logger.info(f"MCP session initialized: {self._session_id}")
+                    else:
+                        logger.info("MCP initialized in stateless mode (no session id)")
                     return
                 else:
                     last_error = f"HTTP {response.status_code}: {response.text[:200]}"
@@ -186,8 +191,8 @@ class MCPClient:
                     continue
                 raise Exception(f"MCP transport error while calling {tool_name}: {e}") from e
             
-            # Handle session expiration (404) - reset and retry
-            if response.status_code == 404 and attempt < max_retries - 1:
+            # Handle session expiration (404) - reset and retry only when session mode is active
+            if self._session_id and response.status_code == 404 and attempt < max_retries - 1:
                 logger.warning(f"MCP session expired (404), re-initializing... (attempt {attempt + 1})")
                 self._session_id = None
                 self._initialized = False

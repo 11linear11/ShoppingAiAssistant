@@ -8,6 +8,7 @@ Supports caching of embeddings for performance optimization.
 This is the MCP protocol version using FastMCP SDK.
 """
 
+import asyncio
 import hashlib
 import sys
 from collections.abc import AsyncIterator
@@ -50,6 +51,11 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+# Shared singleton across HTTP sessions to avoid re-loading heavy models.
+_shared_embedding_manager: Optional["EmbeddingManager"] = None
+_shared_embedding_lock = asyncio.Lock()
 
 
 # ============================================================================
@@ -264,19 +270,27 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
 
     Loads the embedding model on startup and provides it to tools.
     """
-    log_embed("Starting embedding server", {"model": settings.model_name})
-    embedding_manager = EmbeddingManager(
-        model_name=settings.model_name,
-        device=settings.device,
-    )
-    log_embed("Embedding server started", {"model": settings.model_name})
-    if settings.debug_mode:
-        log_embed("DEBUG mode active: embedding caching disabled")
+    global _shared_embedding_manager
+
+    if _shared_embedding_manager is None:
+        async with _shared_embedding_lock:
+            if _shared_embedding_manager is None:
+                log_embed("Starting embedding server", {"model": settings.model_name})
+                _shared_embedding_manager = EmbeddingManager(
+                    model_name=settings.model_name,
+                    device=settings.device,
+                )
+                log_embed("Embedding server started", {"model": settings.model_name})
+                if settings.debug_mode:
+                    log_embed("DEBUG mode active: embedding caching disabled")
+    else:
+        log_embed("Embedding server warm instance reused", {"model": settings.model_name})
 
     try:
-        yield AppContext(embedding_manager=embedding_manager)
+        yield AppContext(embedding_manager=_shared_embedding_manager)
     finally:
-        log_embed("Embedding server shutting down")
+        # Keep warm singleton alive across sessions/process lifespan.
+        pass
 
 
 # Create MCP server
