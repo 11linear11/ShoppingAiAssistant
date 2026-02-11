@@ -26,6 +26,8 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       app-network:
         aliases:
@@ -47,10 +49,11 @@ services:
       DEBUG_MODE: "false"
       DEBUG: "false"
       # ── MCP server URLs (docker internal network) ──
-      MCP_INTERPRET_URL: "http://assistant-interpret:5004"
-      MCP_SEARCH_URL: "http://assistant-search:5002"
+      MCP_INTERPRET_URL: "http://host.docker.internal:${MCP_INTERPRET_HOST_PORT:-5004}"
+      MCP_SEARCH_URL: "http://host.docker.internal:${MCP_SEARCH_HOST_PORT:-5002}"
       # ── Redis (for agent response cache) ──
-      REDIS_HOST: "assistant-redis"
+      REDIS_HOST: "host.docker.internal"
+      REDIS_PORT: "${REDIS_HOST_PORT:-6379}"
       # ── Logfire (observability) ──
       USE_LOGFIRE: "${USE_LOGFIRE:-false}"
       LOGFIRE_TOKEN: "${LOGFIRE_TOKEN:-}"
@@ -72,6 +75,8 @@ services:
         condition: service_started
       redis:
         condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       app-network:
         aliases:
@@ -135,8 +140,9 @@ services:
     env_file: .env
     environment:
       DEBUG_MODE: "false"
-      REDIS_HOST: "assistant-redis"
-      MCP_EMBEDDING_URL: "http://assistant-embedding:5003"
+      REDIS_HOST: "host.docker.internal"
+      REDIS_PORT: "${REDIS_HOST_PORT:-6379}"
+      MCP_EMBEDDING_URL: "http://host.docker.internal:${MCP_EMBEDDING_HOST_PORT:-5003}"
       LOGFIRE_SERVICE_NAME: "shopping-assistant-search"
       PIPELINE_SERVICE_NAME: "shopping-assistant-search"
       DEBUG_LOG: "${DEBUG_LOG:-false}"
@@ -147,6 +153,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       app-network:
         aliases:
