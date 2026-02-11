@@ -203,5 +203,4 @@ networks:
 volumes:
   redis_data:
   huggingface_cache:
-    external: true
     name: aiassistantv3_huggingface_cache
