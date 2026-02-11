@@ -124,6 +124,10 @@ async def health_check(
                 
                 if response.status_code == 200:
                     services[name] = ServiceHealth(status="ok", latency_ms=latency)
+                elif response.status_code == 404:
+                    # MCP servers expose /mcp (not /health) in streamable-http mode.
+                    # A 404 here still proves service reachability.
+                    services[name] = ServiceHealth(status="ok", latency_ms=latency)
                 else:
                     services[name] = ServiceHealth(
                         status="error",
