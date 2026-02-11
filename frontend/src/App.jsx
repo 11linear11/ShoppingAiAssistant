@@ -788,7 +788,23 @@ function App() {
         }),
       });
 
-      const data = await response.json();
+      const raw = await response.text();
+      let data = null;
+      try {
+        data = raw ? JSON.parse(raw) : null;
+      } catch {
+        data = null;
+      }
+
+      if (!response.ok) {
+        const detail = data?.response || data?.error || raw || `HTTP ${response.status}`;
+        throw new Error(detail);
+      }
+
+      if (!data || typeof data !== 'object') {
+        throw new Error('Invalid server response');
+      }
+
       const responseText = typeof data.response === 'string' ? data.response : '';
       const apiProducts = normalizeProducts(Array.isArray(data.products) ? data.products : []);
       const extractedProducts = apiProducts.length > 0 ? apiProducts : extractProductsFromText(responseText);
@@ -804,10 +820,14 @@ function App() {
       }]);
     } catch (error) {
       console.error('Error:', error);
+      const message =
+        typeof error?.message === 'string' && error.message.trim()
+          ? error.message
+          : 'متأسفانه خطایی رخ داد. لطفاً دوباره تلاش کنید.';
       setMessages(prev => [...prev, {
         id: Date.now() + 1,
         role: 'assistant',
-        content: 'متأسفانه خطایی رخ داد. لطفاً دوباره تلاش کنید.',
+        content: message,
       }]);
     } finally {
       setLoading(false);
