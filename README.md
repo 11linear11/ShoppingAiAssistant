@@ -11,11 +11,12 @@ Persian shopping assistant with FastAPI, LangGraph, MCP servers, Redis caching, 
 - MCP servers: `src/mcp_servers/`
 
 ## Services
-- `backend` (FastAPI gateway): `:8080`
-- `search` MCP server: `:5002`
-- `embedding` MCP server: `:5003`
-- `interpret` MCP server: `:5004`
-- `redis`: `:6379`
+- `frontend`: `${FRONTEND_HOST_PORT:-3000}`
+- `backend` (FastAPI gateway): `${BACKEND_HOST_PORT:-8080}`
+- `search` MCP server: `${MCP_SEARCH_HOST_PORT:-5002}`
+- `embedding` MCP server: `${MCP_EMBEDDING_HOST_PORT:-5003}`
+- `interpret` MCP server: `${MCP_INTERPRET_HOST_PORT:-5004}`
+- `redis`: `${REDIS_HOST_PORT:-6379}`
 
 ## Local Run
 ```bash
@@ -29,6 +30,17 @@ python -m uvicorn backend.main:app --host 0.0.0.0 --port 8080 --reload
 ```bash
 docker-compose up --build
 ```
+
+If your server already uses common ports (e.g. `8080`, `6379`), override only host ports in `.env`:
+```env
+BACKEND_HOST_PORT=8081
+REDIS_HOST_PORT=6380
+FRONTEND_HOST_PORT=3001
+MCP_SEARCH_HOST_PORT=5005
+MCP_EMBEDDING_HOST_PORT=5006
+MCP_INTERPRET_HOST_PORT=5007
+```
+Internal service ports and project structure stay unchanged.
 
 Debug stack:
 ```bash
