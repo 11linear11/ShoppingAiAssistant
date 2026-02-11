@@ -823,10 +823,23 @@ mcp = FastMCP(
 
 # Allow Docker internal hostnames for transport security
 mcp.settings.transport_security.allowed_hosts.extend([
-    "search:*", "0.0.0.0:*", "*"
+    "search:*",
+    "host.docker.internal",
+    "host.docker.internal:*",
+    "localhost",
+    "localhost:*",
+    "127.0.0.1",
+    "127.0.0.1:*",
+    "0.0.0.0:*",
+    "*",
 ])
 mcp.settings.transport_security.allowed_origins.extend([
-    "http://search:*", "http://backend:*", "http://0.0.0.0:*"
+    "http://search:*",
+    "http://backend:*",
+    "http://host.docker.internal:*",
+    "http://localhost:*",
+    "http://127.0.0.1:*",
+    "http://0.0.0.0:*",
 ])
 
 
