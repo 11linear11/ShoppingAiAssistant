@@ -4,6 +4,14 @@ import './index.css';
 // API base URL - uses env variable in dev, relative path in production (nginx proxies /api)
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
+const createSessionId = () => {
+  const randomUUID = globalThis?.crypto?.randomUUID;
+  if (typeof randomUUID === 'function') {
+    return randomUUID.call(globalThis.crypto);
+  }
+  return `sess_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
+};
+
 // Icons
 const SendIcon = () => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -745,7 +753,7 @@ function App() {
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState('');
   const [loading, setLoading] = useState(false);
-  const [sessionId] = useState(() => crypto.randomUUID());
+  const [sessionId] = useState(() => createSessionId());
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
