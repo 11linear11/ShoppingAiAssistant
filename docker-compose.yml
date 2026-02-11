@@ -26,6 +26,8 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    environment:
+      BACKEND_HOST_PORT: "${BACKEND_HOST_PORT:-8080}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
