@@ -90,3 +90,5 @@ export-product-list.csv
 
 # Logfire cache
 .logfire/
+*.excalidraw
+*.png
