@@ -1,0 +1,69 @@
+# =============================================================================
+# Docker Compose - Development / Debug Override
+# =============================================================================
+# Usage:
+#   docker-compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+#
+# What's different from production:
+#   ✅ DEBUG_MODE=true  →  No caching, verbose logging
+#   ✅ Volume mounts    →  Code changes without rebuild
+#   ✅ Hot-reload       →  Auto-restart on file changes
+#   ✅ Frontend dev      →  Vite dev server instead of nginx
+# =============================================================================
+
+services:
+
+  # ── Frontend (Vite dev server with hot-reload) ────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.dev.Dockerfile
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/index.html:/app/index.html
+    environment:
+      VITE_API_URL: "http://localhost:8080"
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+    depends_on:
+      backend:
+        condition: service_started
+
+  # ── Backend (with hot-reload) ─────────────────────────────
+  backend:
+    volumes:
+      - ./backend:/app/backend
+      - ./src:/app/src
+    environment:
+      DEBUG_MODE: "true"
+      DEBUG: "true"
+      DEBUG_LOG: "true"
+    command: ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8080", "--reload"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "print('ok')"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  # ── MCP Servers (with volume mounts) ──────────────────────
+  interpret:
+    volumes:
+      - ./src:/app/src
+    environment:
+      DEBUG_MODE: "true"
+      DEBUG_LOG: "true"
+
+  search:
+    volumes:
+      - ./src:/app/src
+    environment:
+      DEBUG_MODE: "true"
+      DEBUG_LOG: "true"
+
+  embedding:
+    volumes:
+      - ./src:/app/src
+    environment:
+      DEBUG_MODE: "true"
+      DEBUG_LOG: "true"

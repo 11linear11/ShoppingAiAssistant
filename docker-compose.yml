@@ -1,0 +1,207 @@
+# =============================================================================
+# Docker Compose - Production
+# =============================================================================
+# Usage:
+#   docker-compose up --build        (start all services)
+#   docker-compose up -d             (start in background)
+#   docker-compose logs -f backend   (follow backend logs)
+#   docker-compose down              (stop all)
+#
+# For DEBUG mode, use:
+#   docker-compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+# =============================================================================
+
+services:
+
+  # ── Frontend (React → Nginx) ──────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+      args:
+        VITE_API_URL: ""  # Empty = use relative /api (nginx proxies)
+    container_name: assistant-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # ── Backend (FastAPI Gateway) ─────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    container_name: assistant-backend
+    ports:
+      - "8080:8080"
+    env_file: .env
+    environment:
+      # ── Production overrides ──
+      DEBUG_MODE: "false"
+      DEBUG: "false"
+      # ── MCP server URLs (docker internal network) ──
+      MCP_INTERPRET_URL: "http://interpret:5004"
+      MCP_SEARCH_URL: "http://search:5002"
+      # ── Redis (for agent response cache) ──
+      REDIS_HOST: "redis"
+      # ── Logfire (observability) ──
+      USE_LOGFIRE: "${USE_LOGFIRE:-false}"
+      LOGFIRE_TOKEN: "${LOGFIRE_TOKEN:-}"
+      LOGFIRE_SERVICE_NAME: "shopping-assistant-backend"
+      LOGFIRE_ENVIRONMENT: "${LOGFIRE_ENVIRONMENT:-production}"
+      PIPELINE_SERVICE_NAME: "shopping-assistant-backend"
+      DEBUG_LOG: "${DEBUG_LOG:-false}"
+      PIPELINE_LOG_TO_FILE: "true"
+      # ── CORS (allow frontend) ──
+      CORS_ORIGINS: '["http://localhost:3000","http://frontend:3000"]'
+    volumes:
+      - ./logs:/app/logs
+      - ./backend:/app/backend
+      - ./src:/app/src
+    depends_on:
+      interpret:
+        condition: service_started
+      search:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      start_period: 120s
+      retries: 5
+
+  # ── Interpret Server (MCP) ────────────────────────────────
+  interpret:
+    build:
+      context: .
+      dockerfile: docker/mcp-servers.Dockerfile
+    container_name: assistant-interpret
+    command: ["python", "-m", "src.mcp_servers.interpret_server"]
+    ports:
+      - "5004:5004"
+    env_file: .env
+    environment:
+      DEBUG_MODE: "false"
+      HF_HOME: /root/.cache/huggingface
+      LOGFIRE_SERVICE_NAME: "shopping-assistant-interpret"
+      PIPELINE_SERVICE_NAME: "shopping-assistant-interpret"
+      DEBUG_LOG: "${DEBUG_LOG:-false}"
+      PIPELINE_LOG_TO_FILE: "true"
+    volumes:
+      - huggingface_cache:/root/.cache/huggingface
+      - ./src:/app/src
+      - ./logs:/app/logs
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+  # ── Search Server (MCP) ──────────────────────────────────
+  search:
+    build:
+      context: .
+      dockerfile: docker/mcp-servers.Dockerfile
+    container_name: assistant-search
+    command: ["python", "-m", "src.mcp_servers.search_server"]
+    ports:
+      - "5002:5002"
+    env_file: .env
+    environment:
+      DEBUG_MODE: "false"
+      REDIS_HOST: "redis"
+      LOGFIRE_SERVICE_NAME: "shopping-assistant-search"
+      PIPELINE_SERVICE_NAME: "shopping-assistant-search"
+      DEBUG_LOG: "${DEBUG_LOG:-false}"
+      PIPELINE_LOG_TO_FILE: "true"
+    volumes:
+      - ./src:/app/src
+      - ./logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+  # ── Embedding Server (MCP) ──────────────────────────────
+  embedding:
+    build:
+      context: .
+      dockerfile: docker/mcp-servers.Dockerfile
+    container_name: assistant-embedding
+    command: ["python", "-m", "src.mcp_servers.embedding_server"]
+    ports:
+      - "5003:5003"
+    env_file: .env
+    environment:
+      DEBUG_MODE: "false"
+      HF_HOME: /root/.cache/huggingface
+      LOGFIRE_SERVICE_NAME: "shopping-assistant-embedding"
+      PIPELINE_SERVICE_NAME: "shopping-assistant-embedding"
+      DEBUG_LOG: "${DEBUG_LOG:-false}"
+      PIPELINE_LOG_TO_FILE: "true"
+    volumes:
+      - huggingface_cache:/root/.cache/huggingface
+      - ./src:/app/src
+      - ./logs:/app/logs
+    networks:
+      - app-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+  # ── Redis ─────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: assistant-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - app-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+# ── Networks ──────────────────────────────────────────────
+networks:
+  app-network:
+    driver: bridge
+
+# ── Volumes ───────────────────────────────────────────────
+volumes:
+  redis_data:
+  huggingface_cache:
+    external: true
+    name: aiassistantv3_huggingface_cache

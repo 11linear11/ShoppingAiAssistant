@@ -1,0 +1,442 @@
+"""
+Agent Service
+
+Wrapper around the ShoppingAgent for use in FastAPI.
+Handles async operations and extracts structured data from responses.
+Includes agent response caching (Level 2 cache) to skip LLM on repeat queries.
+"""
+
+import asyncio
+import json
+import re
+import uuid
+from datetime import datetime
+from typing import Optional
+
+import sys
+from pathlib import Path
+
+# Add project root to path for imports
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+
+from src.agent import ShoppingAgent
+from src.agent_cache import AgentResponseCache
+from src.logging_config import get_logger
+from backend.api.schemas import ProductInfo, ChatMetadata
+from backend.core.config import settings
+
+logger = get_logger(__name__)
+
+
+class AgentService:
+    """
+    Service wrapper for ShoppingAgent.
+    
+    Provides a clean interface for the API to interact with the agent,
+    handling initialization, session management, and response parsing.
+    """
+
+    def __init__(self):
+        self._agent: Optional[ShoppingAgent] = None
+        self._initialized = False
+        self._cache: Optional[AgentResponseCache] = None
+
+    async def initialize(self) -> None:
+        """Initialize the agent and response cache (lazy loading)."""
+        if not self._initialized:
+            self._agent = ShoppingAgent()
+            self._initialized = True
+
+            # Initialize agent response cache
+            if settings.agent_cache_enabled:
+                self._cache = AgentResponseCache(
+                    redis_host=settings.redis_host,
+                    redis_port=settings.redis_port,
+                    redis_password=settings.redis_password,
+                    redis_db=settings.redis_db,
+                    default_ttl=settings.agent_cache_ttl,
+                )
+                await self._cache.connect()
+            else:
+                logger.info("Agent response cache is disabled")
+
+    @property
+    def agent(self) -> ShoppingAgent:
+        """Get the agent instance."""
+        if not self._initialized or self._agent is None:
+            raise RuntimeError("Agent not initialized. Call initialize() first.")
+        return self._agent
+
+    async def chat(
+        self,
+        message: str,
+        session_id: Optional[str] = None,
+        timeout: int = 120,
+    ) -> dict:
+        """
+        Process a chat message and return structured response.
+        
+        Two-level caching:
+          Level 1 (search cache): handled by search_server, saves ES lookup time
+          Level 2 (agent cache):  handled here, skips LLM entirely for repeat queries
+        
+        Args:
+            message: User message in Persian
+            session_id: Optional session ID for continuity
+            timeout: Timeout in seconds
+            
+        Returns:
+            Dictionary with response, products, and metadata
+        """
+        await self.initialize()
+        
+        start_time = datetime.now()
+        
+        if not session_id:
+            session_id = str(uuid.uuid4())
+        
+        # ── Level 2: Agent Response Cache check ────────────────────
+        if self._cache and self._cache.available:
+            cached = await self._cache.get(message)
+            if cached is not None:
+                took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+                # Overwrite timing with actual cache-hit time
+                if "metadata" in cached:
+                    cached["metadata"]["took_ms"] = took_ms
+                    cached["metadata"]["from_agent_cache"] = True
+                cached["session_id"] = session_id
+                logger.info(f"Agent cache HIT ({took_ms}ms) for: {message[:50]}")
+                return cached
+        
+        # ── Cache miss → full pipeline ─────────────────────────────
+        try:
+            # Call agent with timeout
+            response, session_id = await asyncio.wait_for(
+                self.agent.chat(message, session_id),
+                timeout=timeout,
+            )
+            
+            took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            
+            # Extract products from response (if any)
+            products = self._extract_products(response)
+            
+            # Clean response text (remove product details if extracted)
+            clean_response = self._clean_response_text(response, products)
+            
+            # Determine query type
+            query_type = self._detect_query_type(response, products)
+            
+            result = {
+                "success": True,
+                "response": clean_response,
+                "session_id": session_id,
+                "products": products,
+                "metadata": {
+                    "took_ms": took_ms,
+                    "query_type": query_type,
+                    "total_results": len(products) if products else None,
+                    "from_agent_cache": False,
+                },
+            }
+            
+            # ── Store in agent cache (only direct product searches) ──────
+            # Skip caching for: suggestions, clarifications, greetings, errors
+            is_cacheable = (
+                products
+                and query_type == "direct"
+                and not any(
+                    kw in clean_response
+                    for kw in ["پیشنهاد", "انتخاب کنید", "کدوم", "کدام", "منظورتون"]
+                )
+            )
+            if self._cache and self._cache.available and is_cacheable:
+                await self._cache.set(message, result)
+                logger.info(f"Agent cache SET ({len(products)} products) for: {message[:50]}")
+            elif self._cache and products and not is_cacheable:
+                logger.info(f"Agent cache SKIP (query_type={query_type}) for: {message[:50]}")
+            
+            return result
+            
+        except asyncio.TimeoutError:
+            took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            return {
+                "success": False,
+                "response": "متأسفانه پاسخگویی بیش از حد طول کشید. لطفاً دوباره تلاش کنید.",
+                "session_id": session_id,
+                "products": [],
+                "metadata": {
+                    "took_ms": took_ms,
+                    "query_type": "timeout",
+                    "total_results": 0,
+                    "from_agent_cache": False,
+                },
+            }
+        except Exception as e:
+            took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            return {
+                "success": False,
+                "response": f"متأسفانه مشکلی پیش اومد. لطفاً دوباره تلاش کنید.",
+                "session_id": session_id,
+                "products": [],
+                "metadata": {
+                    "took_ms": took_ms,
+                    "query_type": "error",
+                    "total_results": 0,
+                    "from_agent_cache": False,
+                },
+                "error": str(e),
+            }
+
+    def _normalize_json_text(self, text: str) -> str:
+        """
+        Normalize Persian/Arabic digits and number formatting in JSON text
+        so json.loads can parse it.
+        """
+        # Map Persian/Arabic digits to ASCII
+        digit_map = str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789')
+        text = text.translate(digit_map)
+
+        # Remove commas inside numbers (e.g. 5,999,000 → 5999000)
+        # Match digits separated by commas that are NOT inside quotes
+        text = re.sub(r'(?<=\d),(?=\d)', '', text)
+        text = text.replace('،', ',')
+
+        return text
+
+    def _sanitize_json_like(self, text: str) -> str:
+        """Repair common LLM JSON formatting issues."""
+        text = self._normalize_json_text(text or "").strip()
+        text = text.replace('\ufeff', '')
+        text = re.sub(r'^\s*json\s*\n', '', text, flags=re.IGNORECASE)
+        text = re.sub(r',\s*([}\]])', r'\1', text)
+        text = re.sub(r'\bTrue\b', 'true', text)
+        text = re.sub(r'\bFalse\b', 'false', text)
+        text = re.sub(r'\bNone\b', 'null', text)
+        text = re.sub(r'([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:', r'\1"\2":', text)
+        text = re.sub(r'([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)"\s*:', r'\1"\2":', text)
+        text = re.sub(r':\s*\'([^\']*)\'', r': "\1"', text)
+        text = re.sub(r':\s*(-?\d+(?:\.\d+)?)"', r': \1', text)
+        text = re.sub(r':\s*(true|false|null)"', r': \1', text, flags=re.IGNORECASE)
+        return text
+
+    def _parse_json_candidate(self, candidate: str):
+        candidate = (candidate or "").strip()
+        if not candidate:
+            return None
+
+        direct = re.sub(r'^\s*json\s*\n', '', candidate, flags=re.IGNORECASE)
+        for attempt in (direct, self._sanitize_json_like(direct)):
+            try:
+                return json.loads(attempt)
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _to_number(value):
+        if isinstance(value, (int, float)):
+            return float(value)
+        if not isinstance(value, str):
+            return None
+        normalized = value.replace(",", "").strip()
+        if not normalized:
+            return None
+        try:
+            return float(normalized)
+        except Exception:
+            return None
+
+    def _normalize_product(self, item: dict, index: int) -> Optional[dict]:
+        if not isinstance(item, dict):
+            return None
+        name = str(item.get("name") or item.get("product_name") or "").strip()
+        if not name:
+            return None
+
+        price = self._to_number(item.get("price"))
+        discount_price = self._to_number(item.get("discount_price"))
+        discount_percentage = self._to_number(item.get("discount_percentage"))
+        has_discount_raw = item.get("has_discount", False)
+        has_discount = (
+            has_discount_raw is True
+            or str(has_discount_raw).strip().lower() == "true"
+            or (
+                price is not None
+                and discount_price is not None
+                and discount_price < price
+            )
+        )
+
+        return {
+            "id": str(index + 1),
+            "name": name,
+            "brand": str(item.get("brand") or item.get("brand_name") or "").strip(),
+            "price": float(price) if price is not None else 0,
+            "has_discount": bool(has_discount),
+            "discount_percentage": float(discount_percentage) if discount_percentage is not None else 0,
+            "discount_price": float(discount_price) if discount_price is not None else None,
+            "product_url": str(item.get("product_url") or item.get("url") or "").strip(),
+        }
+
+    def _extract_products_from_fields(self, text: str) -> list[dict]:
+        """Fallback parser for broken JSON snippets containing product fields."""
+        text = self._sanitize_json_like(text or "")
+        candidates = re.findall(r'\{[\s\S]*?\}', text) or [text]
+        rows = []
+
+        def read_field(block: str, key: str) -> str:
+            pattern = re.compile(
+                rf'["\']?{key}["\']?\s*:\s*(?:"([^"]*)"|\'([^\']*)\'|([^,\n\r}}]+))',
+                flags=re.IGNORECASE,
+            )
+            m = pattern.search(block)
+            if not m:
+                return ""
+            return (m.group(1) or m.group(2) or m.group(3) or "").strip()
+
+        for block in candidates:
+            row = {
+                "name": read_field(block, "name") or read_field(block, "product_name"),
+                "brand": read_field(block, "brand") or read_field(block, "brand_name"),
+                "price": read_field(block, "price"),
+                "discount_price": read_field(block, "discount_price"),
+                "has_discount": read_field(block, "has_discount"),
+                "discount_percentage": read_field(block, "discount_percentage"),
+                "product_url": read_field(block, "product_url") or read_field(block, "url"),
+            }
+            if row["name"]:
+                rows.append(row)
+
+        products = []
+        for i, row in enumerate(rows):
+            normalized = self._normalize_product(row, i)
+            if normalized:
+                products.append(normalized)
+        return products
+
+    def _extract_products(self, response: str) -> list[dict]:
+        """
+        Extract product information from agent response.
+        
+        The agent returns products as a JSON array inside a ```json code block.
+        """
+        products = []
+
+        candidates = []
+        code_blocks = re.findall(
+            r'(?:```[\t ]*(?:json)?|json```)[\t ]*\n?([\s\S]*?)```',
+            response or "",
+            flags=re.IGNORECASE,
+        )
+        candidates.extend(code_blocks)
+
+        if not candidates:
+            array_match = re.search(r'\[[\s\S]*\]', response or "", re.DOTALL)
+            if array_match:
+                candidates.append(array_match.group(0))
+            object_match = re.search(r'\{[\s\S]*\}', response or "", re.DOTALL)
+            if object_match:
+                candidates.append(object_match.group(0))
+
+        for candidate in candidates:
+            parsed = self._parse_json_candidate(candidate)
+            if parsed is not None:
+                payload = parsed.get("results") if isinstance(parsed, dict) else parsed
+                if isinstance(parsed, dict) and payload is None:
+                    payload = parsed.get("products") or parsed.get("data") or parsed
+                rows = payload if isinstance(payload, list) else [payload]
+                for row in rows:
+                    normalized = self._normalize_product(row, len(products))
+                    if normalized:
+                        products.append(normalized)
+
+            if not products:
+                fallback_rows = self._extract_products_from_fields(candidate)
+                if fallback_rows:
+                    products.extend(fallback_rows)
+
+        if not products:
+            products = self._extract_products_from_fields(response or "")
+
+        deduped = []
+        seen = set()
+        for p in products:
+            key = f'{p.get("name","")}|{p.get("price","")}|{p.get("product_url","")}'
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(p)
+
+        return deduped
+    
+    def _clean_response_text(self, response: str, products: list) -> str:
+        """
+        Remove JSON product block from response, keep only the intro text.
+        """
+        if not products:
+            return response
+
+        clean = response or ""
+        clean = re.sub(r'```[\t ]*(?:json)?[\s\S]*?```', '', clean, flags=re.IGNORECASE).strip()
+        clean = re.sub(r'json```[\s\S]*?```', '', clean, flags=re.IGNORECASE).strip()
+        clean = re.sub(r'\[\s*\{[\s\S]*?\}\s*(?:,\s*\{[\s\S]*?\}\s*)*\]', '', clean, flags=re.DOTALL).strip()
+        clean = re.sub(r'\{\s*\"?name\"?[\s\S]*?\}', '', clean, flags=re.DOTALL).strip()
+
+        # Remove trailing colons, dashes, etc.
+        clean = re.sub(r'[:\s\-]+$', '', clean).strip()
+
+        if not clean:
+            count = len(products)
+            return f"🛍️ {count} محصول پیدا شد"
+
+        return clean
+    
+    def _detect_query_type(self, response: str, products: list) -> str:
+        """Detect the type of query based on response."""
+        # Check for greeting indicators
+        greeting_indicators = ["سلام", "👋", "کمک", "خدمت", "😊", "😄"]
+        if any(ind in response for ind in greeting_indicators) and not products:
+            return "chat"
+        
+        # Check for product search indicators
+        product_indicators = ["📦", "💰", "تومان", "قیمت", "برند"]
+        if any(ind in response for ind in product_indicators):
+            return "direct"
+        
+        # Check for no results
+        no_result_indicators = ["یافت نشد", "پیدا نشد", "متأسفانه"]
+        if any(ind in response for ind in no_result_indicators):
+            return "no_results"
+        
+        return "unknown"
+
+    async def health_check(self) -> dict:
+        """Check if agent is healthy."""
+        try:
+            await self.initialize()
+            health = {"status": "ok", "latency_ms": 0}
+
+            # Include agent cache stats
+            if self._cache and self._cache.available:
+                cache_stats = await self._cache.get_stats()
+                health["agent_cache"] = cache_stats
+            else:
+                health["agent_cache"] = {"available": False}
+
+            return health
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+
+# Global service instance
+_agent_service: Optional[AgentService] = None
+
+
+def get_agent_service() -> AgentService:
+    """Get or create the agent service instance."""
+    global _agent_service
+    if _agent_service is None:
+        _agent_service = AgentService()
+    return _agent_service

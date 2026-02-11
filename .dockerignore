@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment (will be injected via docker-compose)
+.env
+.env.local
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+tests/
+
+# Logs
+logs/
+
+# Backup
+_backup/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary
+*.tmp
+*.temp
+
+# Git
+.git/
+.gitignore
+
+# Docker (exclude Dockerfiles and compose, keep nginx.conf)
+docker/*.Dockerfile
+docker-compose*.yml
+Dockerfile*
+
+# Frontend node_modules (built in container)
+frontend/node_modules/
+frontend/dist/
+
+# Docs
+docs/
+*.md
+
+# Scripts
+scripts/

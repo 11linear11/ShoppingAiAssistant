@@ -1,253 +1,516 @@
 """
-MCP Server for Embeddings and Category Classification
+Embedding MCP Server (MCP Protocol Version)
 Port: 5003
 
-This server handles:
-- get_embedding: Generate embeddings for text
-- classify_categories: Find matching categories for a query
+Provides text embedding generation using multilingual-e5-base model.
+Supports caching of embeddings for performance optimization.
+
+This is the MCP protocol version using FastMCP SDK.
 """
 
-import os
+import hashlib
 import sys
-import json
-import logging
-import numpy as np
-from typing import List, Dict, Any
-from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
-from dotenv import load_dotenv
+import numpy as np
+from mcp.server.fastmcp import Context, FastMCP
+from pydantic import Field
+from pydantic_settings import BaseSettings
 from sentence_transformers import SentenceTransformer
-from mcp.server.fastmcp import FastMCP
 
-load_dotenv()
+# Add parent path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from src.pipeline_logger import log_embed
 
-# ═══════════════════════════════════════════════════════════════
+
+# ============================================================================
 # Configuration
-# ═══════════════════════════════════════════════════════════════
-SERVER_NAME = "embedding-server"
-SERVER_PORT = 5003
-DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-
-# Path to category embeddings
-CATEGORY_EMBEDDINGS_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-    "full_category_embeddings.json"
-)
-
-# ═══════════════════════════════════════════════════════════════
-# Logging Setup
-# ═══════════════════════════════════════════════════════════════
-logging.basicConfig(
-    level=logging.DEBUG if DEBUG_MODE else logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(SERVER_NAME)
+# ============================================================================
 
 
-# ═══════════════════════════════════════════════════════════════
-# Helper Functions
-# ═══════════════════════════════════════════════════════════════
-def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
-    """Calculate cosine similarity between two vectors."""
-    vec1 = np.array(vec1)
-    vec2 = np.array(vec2)
-    dot_product = np.dot(vec1, vec2)
-    norm1 = np.linalg.norm(vec1)
-    norm2 = np.linalg.norm(vec2)
-    if norm1 == 0 or norm2 == 0:
-        return 0.0
-    return float(dot_product / (norm1 * norm2))
+class Settings(BaseSettings):
+    """Application settings loaded from environment variables."""
+
+    model_name: str = Field(
+        default="intfloat/multilingual-e5-base",
+        alias="EMBEDDING_MODEL",
+    )
+    device: str = Field(default="cpu", alias="EMBEDDING_DEVICE")
+    max_seq_length: int = Field(default=512, alias="EMBEDDING_MAX_SEQ_LENGTH")
+    batch_size: int = Field(default=32, alias="EMBEDDING_BATCH_SIZE")
+
+    # Debug mode - disables caching
+    debug_mode: bool = Field(default=False, alias="DEBUG_MODE")
+
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
-def load_category_embeddings() -> Dict[str, List[float]]:
-    """Load pre-computed category embeddings from JSON file."""
-    try:
-        with open(CATEGORY_EMBEDDINGS_PATH, 'r', encoding='utf-8') as f:
-            embeddings = json.load(f)
-        logger.info(f"✅ Loaded {len(embeddings)} category embeddings")
-        return embeddings
-    except FileNotFoundError:
-        logger.error(f"❌ Category embeddings file not found: {CATEGORY_EMBEDDINGS_PATH}")
-        return {}
-    except json.JSONDecodeError as e:
-        logger.error(f"❌ Error parsing category embeddings JSON: {e}")
-        return {}
+settings = Settings()
 
 
-# ═══════════════════════════════════════════════════════════════
-# Embedding Service Class
-# ═══════════════════════════════════════════════════════════════
-class EmbeddingService:
-    """Handles text embeddings and category classification."""
-    
-    def __init__(self):
-        logger.info("🔧 Initializing EmbeddingService...")
-        
-        # Load SentenceTransformer model
-        model_name = 'intfloat/multilingual-e5-base'
-        logger.info(f"📦 Loading embedding model: {model_name}")
-        self.model = SentenceTransformer(model_name)
-        logger.info("✅ Embedding model loaded")
-        
-        # Load category embeddings
-        self.category_embeddings = load_category_embeddings()
-        logger.info(f"✅ Loaded {len(self.category_embeddings)} category embeddings")
-    
-    def get_embedding(self, text: str) -> List[float]:
-        """Generate embedding for a single text."""
-        embedding = self.model.encode([text])[0]
-        return embedding.tolist()
-    
-    def get_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings for multiple texts."""
-        embeddings = self.model.encode(texts)
-        return [emb.tolist() for emb in embeddings]
-    
-    def classify_categories(
-        self, 
-        query: str, 
-        top_k: int = 3, 
-        threshold: float = 0.25
-    ) -> List[Dict[str, Any]]:
+# ============================================================================
+# Embedding Manager
+# ============================================================================
+
+
+class EmbeddingManager:
+    """
+    Manager for text embeddings using multilingual-e5-base.
+
+    Features:
+    - Single and batch embedding generation
+    - Embedding normalization
+    - Cosine similarity calculation
+    - In-memory caching
+    """
+
+    def __init__(self, model_name: str, device: str = "cpu"):
         """
-        Find top-k categories most similar to the query.
-        
+        Initialize the embedding manager.
+
         Args:
-            query: Search query text
-            top_k: Number of top categories to return
-            threshold: Minimum similarity threshold
-            
-        Returns:
-            List of dicts with 'category' and 'similarity' keys
+            model_name: HuggingFace model name
+            device: Device to run model on (cpu/cuda)
         """
-        # Generate query embedding
-        query_vec = self.get_embedding(query)
-        
-        # Calculate similarity with all categories
-        scores = []
-        for cat, cat_emb in self.category_embeddings.items():
-            sim = cosine_similarity(query_vec, cat_emb)
-            if sim >= threshold:
-                scores.append({"category": cat, "similarity": round(sim, 4)})
-        
-        # Sort by similarity descending
-        scores.sort(key=lambda x: x["similarity"], reverse=True)
-        
-        # Return top-k
-        return scores[:top_k]
+        log_embed("Loading embedding model", {"model": model_name, "device": device})
+        self.model = SentenceTransformer(model_name, device=device)
+        self.model.max_seq_length = settings.max_seq_length
+        self.dimensions = self.model.get_sentence_embedding_dimension()
+        log_embed("Embedding model loaded", {"dimensions": self.dimensions})
+
+        # In-memory cache for embeddings
+        self._cache: dict[str, list[float]] = {}
+
+    def generate_embedding(
+        self,
+        text: str,
+        normalize: bool = True,
+        use_cache: bool = True,
+    ) -> tuple[list[float], bool]:
+        """
+        Generate embedding for a single text.
+
+        Args:
+            text: Input text
+            normalize: Whether to L2 normalize the embedding
+            use_cache: Whether to use in-memory cache
+
+        Returns:
+            Tuple of (embedding vector, from_cache flag)
+        """
+        # In DEBUG_MODE, disable caching
+        if settings.debug_mode:
+            use_cache = False
+
+        # Check cache
+        cache_key = self._get_cache_key(text, normalize)
+        if use_cache and cache_key in self._cache:
+            return self._cache[cache_key], True
+
+        # Generate embedding
+        # For E5 models, we need to add prefix for better performance
+        prefixed_text = f"query: {text}"
+        embedding = self.model.encode(
+            prefixed_text,
+            normalize_embeddings=normalize,
+            show_progress_bar=False,
+        )
+
+        # Convert to list and store in cache
+        embedding_list = embedding.tolist()
+        if use_cache:
+            self._cache[cache_key] = embedding_list
+
+        return embedding_list, False
+
+    def generate_embeddings_batch(
+        self,
+        texts: list[str],
+        normalize: bool = True,
+        use_cache: bool = True,
+    ) -> tuple[list[list[float]], int]:
+        """
+        Generate embeddings for multiple texts.
+
+        Args:
+            texts: List of input texts
+            normalize: Whether to L2 normalize embeddings
+            use_cache: Whether to use in-memory cache
+
+        Returns:
+            Tuple of (list of embeddings, cache hit count)
+        """
+        # In DEBUG_MODE, disable caching
+        if settings.debug_mode:
+            use_cache = False
+
+        results = []
+        cache_hits = 0
+        texts_to_encode = []
+        indices_to_encode = []
+
+        # Check cache for each text
+        for i, text in enumerate(texts):
+            cache_key = self._get_cache_key(text, normalize)
+            if use_cache and cache_key in self._cache:
+                results.append((i, self._cache[cache_key]))
+                cache_hits += 1
+            else:
+                texts_to_encode.append(text)
+                indices_to_encode.append(i)
+                results.append((i, None))
+
+        # Generate embeddings for uncached texts
+        if texts_to_encode:
+            # Add E5 prefix
+            prefixed_texts = [f"query: {t}" for t in texts_to_encode]
+            embeddings = self.model.encode(
+                prefixed_texts,
+                normalize_embeddings=normalize,
+                show_progress_bar=False,
+                batch_size=settings.batch_size,
+            )
+
+            # Store in cache and update results
+            for idx, (original_idx, text) in enumerate(
+                zip(indices_to_encode, texts_to_encode)
+            ):
+                embedding_list = embeddings[idx].tolist()
+                cache_key = self._get_cache_key(text, normalize)
+                if use_cache:
+                    self._cache[cache_key] = embedding_list
+
+                # Update result at original index
+                for j, (result_idx, _) in enumerate(results):
+                    if result_idx == original_idx:
+                        results[j] = (original_idx, embedding_list)
+                        break
+
+        # Sort by original index and extract embeddings
+        results.sort(key=lambda x: x[0])
+        return [emb for _, emb in results], cache_hits
+
+    def calculate_similarity(
+        self,
+        text1: str,
+        text2: str,
+        normalize: bool = True,
+    ) -> float:
+        """
+        Calculate cosine similarity between two texts.
+
+        Args:
+            text1: First text
+            text2: Second text
+            normalize: Whether to normalize embeddings
+
+        Returns:
+            Cosine similarity score [-1, 1]
+        """
+        emb1, _ = self.generate_embedding(text1, normalize)
+        emb2, _ = self.generate_embedding(text2, normalize)
+
+        vec1 = np.array(emb1)
+        vec2 = np.array(emb2)
+
+        # If already normalized, dot product gives cosine similarity
+        if normalize:
+            return float(np.dot(vec1, vec2))
+
+        # Otherwise calculate full cosine similarity
+        norm1 = np.linalg.norm(vec1)
+        norm2 = np.linalg.norm(vec2)
+        if norm1 == 0 or norm2 == 0:
+            return 0.0
+        return float(np.dot(vec1, vec2) / (norm1 * norm2))
+
+    def clear_cache(self) -> int:
+        """Clear in-memory cache."""
+        count = len(self._cache)
+        self._cache.clear()
+        return count
+
+    def get_cache_size(self) -> int:
+        """Get number of cached embeddings."""
+        return len(self._cache)
+
+    @staticmethod
+    def _get_cache_key(text: str, normalize: bool) -> str:
+        """Generate cache key for text."""
+        text_hash = hashlib.md5(text.encode()).hexdigest()
+        return f"{text_hash}_{normalize}"
 
 
-# ═══════════════════════════════════════════════════════════════
-# Global Service Instance
-# ═══════════════════════════════════════════════════════════════
-embedding_service: EmbeddingService = None
+# ============================================================================
+# MCP Server Setup with Lifespan
+# ============================================================================
 
 
-# ═══════════════════════════════════════════════════════════════
-# MCP Server Setup
-# ═══════════════════════════════════════════════════════════════
+@dataclass
+class AppContext:
+    """Application context with embedding manager."""
+
+    embedding_manager: EmbeddingManager
+
+
 @asynccontextmanager
-async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
-    """Initialize resources on startup."""
-    global embedding_service
-    logger.info(f"🚀 Starting {SERVER_NAME} on port {SERVER_PORT}...")
-    embedding_service = EmbeddingService()
-    logger.info(f"✅ {SERVER_NAME} ready!")
-    yield {"embedding_service": embedding_service}
-    logger.info(f"👋 Shutting down {SERVER_NAME}...")
+async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
+    """
+    Manage application lifecycle.
+
+    Loads the embedding model on startup and provides it to tools.
+    """
+    log_embed("Starting embedding server", {"model": settings.model_name})
+    embedding_manager = EmbeddingManager(
+        model_name=settings.model_name,
+        device=settings.device,
+    )
+    log_embed("Embedding server started", {"model": settings.model_name})
+    if settings.debug_mode:
+        log_embed("DEBUG mode active: embedding caching disabled")
+
+    try:
+        yield AppContext(embedding_manager=embedding_manager)
+    finally:
+        log_embed("Embedding server shutting down")
 
 
 # Create MCP server
 mcp = FastMCP(
-    SERVER_NAME,
-    lifespan=lifespan
+    "Embedding Server",
+    lifespan=app_lifespan,
 )
 
+# Allow Docker internal hostnames for transport security
+mcp.settings.transport_security.allowed_hosts.extend([
+    "embedding:*", "0.0.0.0:*", "*"
+])
+mcp.settings.transport_security.allowed_origins.extend([
+    "http://embedding:*", "http://backend:*", "http://0.0.0.0:*"
+])
 
-# ═══════════════════════════════════════════════════════════════
+
+# ============================================================================
 # MCP Tools
-# ═══════════════════════════════════════════════════════════════
-@mcp.tool()
-def get_embedding(text: str) -> str:
-    """
-    Generate embedding vector for a text.
-    
-    Args:
-        text: The text to generate embedding for
-        
-    Returns:
-        JSON string containing the embedding vector
-    """
-    global embedding_service
-    logger.debug(f"📥 get_embedding called with text: '{text[:50]}...'")
-    
-    try:
-        embedding = embedding_service.get_embedding(text)
-        result = {
-            "success": True,
-            "text": text,
-            "embedding": embedding,
-            "dimension": len(embedding)
-        }
-        logger.debug(f"✅ Embedding generated (dim={len(embedding)})")
-        return json.dumps(result, ensure_ascii=False)
-    except Exception as e:
-        logger.error(f"❌ Error generating embedding: {e}")
-        return json.dumps({
-            "success": False,
-            "error": str(e)
-        }, ensure_ascii=False)
+# ============================================================================
 
 
 @mcp.tool()
-def classify_categories(query: str, top_k: int = 3) -> str:
+def generate_embedding(
+    text: str,
+    normalize: bool = True,
+    use_cache: bool = True,
+    ctx: Context = None,
+) -> dict[str, Any]:
     """
-    Find the most relevant product categories for a search query.
-    
+    Generate embedding for a single text.
+
+    Uses multilingual-e5-base model for high-quality
+    multilingual embeddings supporting Persian and English.
+
     Args:
-        query: The search query to classify
-        top_k: Number of top categories to return (default: 3)
-        
+        text: Input text to embed (max 8192 chars)
+        normalize: Whether to L2 normalize the embedding
+        use_cache: Whether to use in-memory cache
+
     Returns:
-        JSON string with list of matching categories and their similarity scores
+        Dict with embedding vector and metadata
     """
-    global embedding_service
-    logger.debug(f"📥 classify_categories called with query: '{query}'")
-    
-    try:
-        categories = embedding_service.classify_categories(query, top_k=top_k)
-        result = {
-            "success": True,
-            "query": query,
-            "categories": categories,
-            "count": len(categories)
-        }
-        logger.debug(f"✅ Found {len(categories)} categories")
-        return json.dumps(result, ensure_ascii=False)
-    except Exception as e:
-        logger.error(f"❌ Error classifying categories: {e}")
-        return json.dumps({
-            "success": False,
-            "error": str(e)
-        }, ensure_ascii=False)
+    if not text or len(text) > 8192:
+        return {"success": False, "error": "Text must be 1-8192 characters"}
+
+    manager = ctx.request_context.lifespan_context.embedding_manager
+
+    embedding, from_cache = manager.generate_embedding(
+        text=text,
+        normalize=normalize,
+        use_cache=use_cache,
+    )
+
+    return {
+        "success": True,
+        "text": text,
+        "embedding": embedding,
+        "dimensions": len(embedding),
+        "normalized": normalize,
+        "from_cache": from_cache,
+    }
 
 
-# ═══════════════════════════════════════════════════════════════
-# Main Entry Point
-# ═══════════════════════════════════════════════════════════════
-# Configure mount path
-mcp.settings.streamable_http_path = "/"
+@mcp.tool()
+def generate_embeddings_batch(
+    texts: list[str],
+    normalize: bool = True,
+    use_cache: bool = True,
+    ctx: Context = None,
+) -> dict[str, Any]:
+    """
+    Generate embeddings for multiple texts.
 
-# Create ASGI app for uvicorn
-app = mcp.streamable_http_app()
+    More efficient than calling generate_embedding multiple times
+    due to batch processing.
+
+    Args:
+        texts: List of input texts (max 100)
+        normalize: Whether to L2 normalize embeddings
+        use_cache: Whether to use in-memory cache
+
+    Returns:
+        Dict with list of embeddings and metadata
+    """
+    if not texts or len(texts) > 100:
+        return {"success": False, "error": "texts must have 1-100 items"}
+
+    manager = ctx.request_context.lifespan_context.embedding_manager
+
+    embeddings, cache_hits = manager.generate_embeddings_batch(
+        texts=texts,
+        normalize=normalize,
+        use_cache=use_cache,
+    )
+
+    return {
+        "success": True,
+        "embeddings": embeddings,
+        "dimensions": len(embeddings[0]) if embeddings else 0,
+        "count": len(embeddings),
+        "normalized": normalize,
+        "cache_hits": cache_hits,
+    }
+
+
+@mcp.tool()
+def calculate_similarity(
+    text1: str,
+    text2: str,
+    ctx: Context = None,
+) -> dict[str, Any]:
+    """
+    Calculate cosine similarity between two texts.
+
+    Returns a score between -1 and 1, where:
+    - 1 = identical meaning
+    - 0 = unrelated
+    - -1 = opposite meaning
+
+    Args:
+        text1: First text
+        text2: Second text
+
+    Returns:
+        Dict with similarity score
+    """
+    if not text1 or not text2:
+        return {"success": False, "error": "Both texts are required"}
+
+    manager = ctx.request_context.lifespan_context.embedding_manager
+
+    similarity = manager.calculate_similarity(text1=text1, text2=text2)
+
+    return {
+        "success": True,
+        "text1": text1,
+        "text2": text2,
+        "similarity": round(similarity, 6),
+    }
+
+
+@mcp.tool()
+def get_embedding_cache_stats(ctx: Context = None) -> dict[str, Any]:
+    """
+    Get embedding cache statistics.
+
+    Returns:
+        Dict with cache size and model info
+    """
+    manager = ctx.request_context.lifespan_context.embedding_manager
+
+    return {
+        "success": True,
+        "cache_size": manager.get_cache_size(),
+        "model": settings.model_name,
+        "dimensions": manager.dimensions,
+    }
+
+
+@mcp.tool()
+def clear_embedding_cache(ctx: Context = None) -> dict[str, Any]:
+    """
+    Clear embedding cache.
+
+    Returns:
+        Dict with number of cleared entries
+    """
+    manager = ctx.request_context.lifespan_context.embedding_manager
+
+    cleared = manager.clear_cache()
+    return {
+        "success": True,
+        "cleared": cleared,
+    }
+
+
+@mcp.tool()
+def get_model_info(ctx: Context = None) -> dict[str, Any]:
+    """
+    Get embedding model information.
+
+    Returns:
+        Dict with model name, dimensions, and settings
+    """
+    manager = ctx.request_context.lifespan_context.embedding_manager
+
+    return {
+        "success": True,
+        "model_name": settings.model_name,
+        "dimensions": manager.dimensions,
+        "max_seq_length": settings.max_seq_length,
+        "device": settings.device,
+        "debug_mode": settings.debug_mode,
+    }
+
+
+# ============================================================================
+# MCP Resources
+# ============================================================================
+
+
+@mcp.resource("embedding://model/info")
+def model_info_resource(ctx: Context = None) -> str:
+    """Expose model information as a resource."""
+    import json
+
+    return json.dumps(
+        {
+            "model_name": settings.model_name,
+            "max_seq_length": settings.max_seq_length,
+            "device": settings.device,
+            "batch_size": settings.batch_size,
+            "debug_mode": settings.debug_mode,
+        },
+        indent=2,
+    )
+
+
+# ============================================================================
+# Run Server
+# ============================================================================
+
 
 if __name__ == "__main__":
-    import uvicorn
-    
-    logger.info(f"🚀 Starting {SERVER_NAME} MCP Server...")
-    logger.info(f"📡 Port: {SERVER_PORT}")
-    logger.info(f"🔧 Debug Mode: {DEBUG_MODE}")
-    
-    # Run with uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=SERVER_PORT)
+    transport = "streamable-http"
+
+    if "--stdio" in sys.argv:
+        transport = "stdio"
+        log_embed("Running with stdio transport")
+    else:
+        # Configure host/port via settings
+        mcp.settings.host = "0.0.0.0"
+        mcp.settings.port = 5003
+        log_embed("Running with HTTP transport", {"url": "http://0.0.0.0:5003/mcp"})
+
+    mcp.run(transport=transport)

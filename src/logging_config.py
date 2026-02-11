@@ -1,335 +1,206 @@
 """
-Centralized Logging Configuration using Logfire
-All MCP servers and the agent use this configuration.
+Logging Configuration
 
-Features:
-- Structured logging with spans
-- MCP server instrumentation
-- Console and cloud logging
-- Request/response tracking
-- Performance metrics
+Centralized logging setup with Logfire integration
+for the Shopping AI Assistant.
 """
 
-import os
+import logging
 import sys
-import time
-import functools
-from typing import Any, Callable, Optional
-from contextlib import contextmanager
-from logging import basicConfig, getLogger, Logger, DEBUG, INFO, WARNING
+from datetime import datetime
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from typing import Optional
 
-import logfire
-from logfire import LogfireSpan
+from pydantic_settings import BaseSettings
 
-# ═══════════════════════════════════════════════════════════════
-# Configuration
-# ═══════════════════════════════════════════════════════════════
-DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-SERVICE_NAME = os.getenv("LOGFIRE_SERVICE_NAME", "shopping-assistant")
-SEND_TO_LOGFIRE = os.getenv("SEND_TO_LOGFIRE", "if-token-present")
-LOG_LEVEL = DEBUG if DEBUG_MODE else INFO
+# Try to import logfire, but make it optional
+try:
+    import logfire
 
-# Emojis for log levels
-EMOJI = {
-    "start": "🚀",
-    "success": "✅",
-    "error": "❌",
-    "warning": "⚠️",
-    "info": "ℹ️",
-    "debug": "🔍",
-    "tool": "🔧",
-    "search": "🔎",
-    "embed": "🧠",
-    "llm": "🤖",
-    "db": "💾",
-    "http": "🌐",
-    "time": "⏱️",
-}
+    LOGFIRE_AVAILABLE = True
+except ImportError:
+    LOGFIRE_AVAILABLE = False
 
 
-# ═══════════════════════════════════════════════════════════════
-# Logfire Configuration
-# ═══════════════════════════════════════════════════════════════
-_configured = False
+class LoggingSettings(BaseSettings):
+    """Logging configuration settings."""
+
+    logfire_token: str = ""
+    logfire_service_name: str = "shopping-assistant"
+    log_level: str = "INFO"
+    log_to_file: bool = True
+    log_dir: str = "logs"
+    log_max_bytes: int = 10_000_000  # 10MB
+    log_backup_count: int = 5
+
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+        env_prefix = ""
+        extra = "ignore"
 
 
-def configure_logging(service_name: str = None) -> "logfire":
+settings = LoggingSettings()
+
+
+def setup_logging(
+    service_name: Optional[str] = None,
+    level: Optional[str] = None,
+    force: bool = True,
+) -> logging.Logger:
     """
-    Configure Logfire for the application.
-    
+    Setup logging with optional Logfire integration.
+
     Args:
-        service_name: Optional service name override (e.g., "embedding-server")
-        
+        service_name: Name of the service (for Logfire)
+        level: Log level (DEBUG, INFO, WARNING, ERROR)
+        force: Force reconfigure root handlers (recommended for app entrypoints)
+
     Returns:
-        Configured logfire instance
+        Configured logger instance
     """
-    global _configured
-    
-    if _configured:
-        return logfire
-        
-    final_service_name = service_name or SERVICE_NAME
-    
-    # Configure Logfire with detailed options
-    logfire.configure(
-        service_name=final_service_name,
-        send_to_logfire=SEND_TO_LOGFIRE,
-        console=logfire.ConsoleOptions(
-            colors='auto',
-            span_style='show-parents' if DEBUG_MODE else 'simple',
-            include_timestamps=True,
-            verbose=DEBUG_MODE,
-            min_log_level='debug' if DEBUG_MODE else 'info',
-        ),
+    service_name = service_name or settings.logfire_service_name
+    level = level or settings.log_level
+
+    # Configure log format
+    log_format = (
+        "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
     )
-    
-    # Integrate with standard library logging
-    basicConfig(
-        level=LOG_LEVEL,
-        handlers=[logfire.LogfireLoggingHandler()],
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+
+    handlers = [
+        logging.StreamHandler(sys.stdout),
+    ]
+
+    # Add file handler if enabled
+    if settings.log_to_file:
+        log_dir = Path(settings.log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Main log file
+        log_file = log_dir / f"{service_name}.log"
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=settings.log_max_bytes,
+            backupCount=settings.log_backup_count,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(logging.Formatter(log_format))
+        handlers.append(file_handler)
+        
+        # Error log file (only ERROR and above)
+        error_log_file = log_dir / f"{service_name}.error.log"
+        error_handler = RotatingFileHandler(
+            error_log_file,
+            maxBytes=settings.log_max_bytes,
+            backupCount=settings.log_backup_count,
+            encoding="utf-8",
+        )
+        error_handler.setFormatter(logging.Formatter(log_format))
+        error_handler.setLevel(logging.ERROR)
+        handlers.append(error_handler)
+
+    logging.basicConfig(
+        level=getattr(logging, level.upper()),
+        format=log_format,
+        handlers=handlers,
+        force=force,
     )
-    
-    # Instrument MCP if available
-    try:
-        logfire.instrument_mcp()
-    except Exception:
-        pass
-    
-    _configured = True
-    logfire.info(f"{EMOJI['start']} Logging configured for {final_service_name}")
-    
-    return logfire
+
+    logger = logging.getLogger(service_name)
+
+    # Setup Logfire if available and configured
+    if LOGFIRE_AVAILABLE and settings.logfire_token:
+        try:
+            logfire.configure(
+                token=settings.logfire_token,
+                service_name=service_name,
+            )
+            logger.info("✅ Logfire configured successfully")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to configure Logfire: {e}")
+
+    return logger
 
 
-# ═══════════════════════════════════════════════════════════════
-# Logger Factory
-# ═══════════════════════════════════════════════════════════════
-class MCPLogger:
-    """Enhanced logger for MCP servers with structured logging."""
-    
-    def __init__(self, name: str):
-        self.name = name
-        self._logger = getLogger(name)
-        self._logger.setLevel(LOG_LEVEL)
-        
-    def info(self, message: str, **kwargs):
-        """Log info with optional structured data."""
-        logfire.info(f"{EMOJI['info']} [{self.name}] {message}", **kwargs)
-        
-    def debug(self, message: str, **kwargs):
-        """Log debug with optional structured data."""
-        if DEBUG_MODE:
-            logfire.debug(f"{EMOJI['debug']} [{self.name}] {message}", **kwargs)
-            
-    def warning(self, message: str, **kwargs):
-        """Log warning with optional structured data."""
-        logfire.warn(f"{EMOJI['warning']} [{self.name}] {message}", **kwargs)
-        
-    def error(self, message: str, error: Exception = None, **kwargs):
-        """Log error with optional exception details."""
-        if error:
-            kwargs['error_type'] = type(error).__name__
-            kwargs['error_message'] = str(error)
-        logfire.error(f"{EMOJI['error']} [{self.name}] {message}", **kwargs)
-        
-    def success(self, message: str, **kwargs):
-        """Log success message."""
-        logfire.info(f"{EMOJI['success']} [{self.name}] {message}", **kwargs)
-        
-    @contextmanager
-    def span(self, operation: str, **attributes):
-        """Create a span for tracking an operation."""
-        with logfire.span(f"{self.name}.{operation}", **attributes) as span:
-            yield span
-            
-    @contextmanager
-    def tool_span(self, tool_name: str, **attributes):
-        """Create a span for MCP tool execution."""
-        start_time = time.time()
-        logfire.info(f"{EMOJI['tool']} [{self.name}] Tool '{tool_name}' started", **attributes)
-        
-        try:
-            with logfire.span(f"tool.{tool_name}", **attributes) as span:
-                yield span
-                duration = time.time() - start_time
-                logfire.info(
-                    f"{EMOJI['success']} [{self.name}] Tool '{tool_name}' completed",
-                    duration_ms=round(duration * 1000, 2),
-                    **attributes
-                )
-        except Exception as e:
-            duration = time.time() - start_time
-            logfire.error(
-                f"{EMOJI['error']} [{self.name}] Tool '{tool_name}' failed: {e}",
-                duration_ms=round(duration * 1000, 2),
-                error_type=type(e).__name__,
-                **attributes
-            )
-            raise
-            
-    @contextmanager  
-    def search_span(self, query: str, **attributes):
-        """Create a span for search operations."""
-        start_time = time.time()
-        logfire.info(f"{EMOJI['search']} [{self.name}] Search: '{query}'", **attributes)
-        
-        try:
-            with logfire.span(f"search.{self.name}", query=query, **attributes) as span:
-                yield span
-                duration = time.time() - start_time
-                logfire.info(
-                    f"{EMOJI['success']} [{self.name}] Search completed",
-                    duration_ms=round(duration * 1000, 2),
-                    query=query
-                )
-        except Exception as e:
-            duration = time.time() - start_time
-            logfire.error(
-                f"{EMOJI['error']} [{self.name}] Search failed: {e}",
-                duration_ms=round(duration * 1000, 2),
-                query=query,
-                error_type=type(e).__name__
-            )
-            raise
-            
-    @contextmanager
-    def llm_span(self, model: str, prompt_preview: str = None, **attributes):
-        """Create a span for LLM operations."""
-        start_time = time.time()
-        preview = prompt_preview[:100] + "..." if prompt_preview and len(prompt_preview) > 100 else prompt_preview
-        logfire.info(f"{EMOJI['llm']} [{self.name}] LLM call to '{model}'", prompt_preview=preview, **attributes)
-        
-        try:
-            with logfire.span(f"llm.{model}", **attributes) as span:
-                yield span
-                duration = time.time() - start_time
-                logfire.info(
-                    f"{EMOJI['success']} [{self.name}] LLM response received",
-                    model=model,
-                    duration_ms=round(duration * 1000, 2)
-                )
-        except Exception as e:
-            duration = time.time() - start_time
-            logfire.error(
-                f"{EMOJI['error']} [{self.name}] LLM call failed: {e}",
-                model=model,
-                duration_ms=round(duration * 1000, 2),
-                error_type=type(e).__name__
-            )
-            raise
-            
-    @contextmanager
-    def db_span(self, operation: str, **attributes):
-        """Create a span for database operations."""
-        start_time = time.time()
-        logfire.debug(f"{EMOJI['db']} [{self.name}] DB: {operation}", **attributes)
-        
-        try:
-            with logfire.span(f"db.{operation}", **attributes) as span:
-                yield span
-                duration = time.time() - start_time
-                logfire.debug(
-                    f"{EMOJI['success']} [{self.name}] DB operation completed",
-                    operation=operation,
-                    duration_ms=round(duration * 1000, 2)
-                )
-        except Exception as e:
-            duration = time.time() - start_time
-            logfire.error(
-                f"{EMOJI['error']} [{self.name}] DB operation failed: {e}",
-                operation=operation,
-                duration_ms=round(duration * 1000, 2),
-                error_type=type(e).__name__
-            )
-            raise
+def get_logger(name: str) -> logging.Logger:
+    """
+    Get a logger instance for a module.
 
-    def log_request(self, tool_name: str, arguments: dict):
-        """Log incoming tool request."""
-        # Truncate large values for logging
-        truncated_args = {}
-        for k, v in arguments.items():
-            if isinstance(v, str) and len(v) > 200:
-                truncated_args[k] = v[:200] + "..."
-            elif isinstance(v, list) and len(v) > 10:
-                truncated_args[k] = f"[{len(v)} items]"
-            else:
-                truncated_args[k] = v
-                
-        logfire.info(
-            f"{EMOJI['http']} [{self.name}] Request: {tool_name}",
-            tool=tool_name,
-            arguments=truncated_args
+    Args:
+        name: Logger name (typically __name__)
+
+    Returns:
+        Logger instance
+    """
+    return logging.getLogger(f"{settings.logfire_service_name}.{name}")
+
+
+class LogContext:
+    """Context manager for structured logging."""
+
+    def __init__(self, logger: logging.Logger, operation: str, **kwargs):
+        self.logger = logger
+        self.operation = operation
+        self.context = kwargs
+
+    def __enter__(self):
+        self.logger.info(
+            f"Starting: {self.operation}",
+            extra={"context": self.context},
         )
-        
-    def log_response(self, tool_name: str, result: Any, duration_ms: float = None):
-        """Log tool response."""
-        result_preview = str(result)[:200] if result else "None"
-        logfire.info(
-            f"{EMOJI['success']} [{self.name}] Response: {tool_name}",
-            tool=tool_name,
-            result_preview=result_preview,
-            duration_ms=duration_ms
-        )
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type:
+            self.logger.error(
+                f"Failed: {self.operation} - {exc_val}",
+                extra={"context": self.context, "error": str(exc_val)},
+            )
+        else:
+            self.logger.info(
+                f"Completed: {self.operation}",
+                extra={"context": self.context},
+            )
+        return False
 
 
-def get_logger(name: str) -> MCPLogger:
-    """Get an MCPLogger instance for the given name."""
-    return MCPLogger(name)
+# Decorators for tracing (work with or without Logfire)
+def trace_operation(operation_name: str):
+    """Decorator to trace async function execution."""
 
-
-# ═══════════════════════════════════════════════════════════════
-# Decorators
-# ═══════════════════════════════════════════════════════════════
-def log_tool(logger: MCPLogger):
-    """Decorator to automatically log MCP tool execution."""
-    def decorator(func: Callable):
-        @functools.wraps(func)
-        async def async_wrapper(*args, **kwargs):
-            tool_name = func.__name__
-            start_time = time.time()
-            logger.log_request(tool_name, kwargs)
-            
+    def decorator(func):
+        async def wrapper(*args, **kwargs):
+            logger = get_logger(func.__module__)
+            logger.debug(f"→ {operation_name}")
             try:
-                with logger.tool_span(tool_name, **{k: str(v)[:100] for k, v in kwargs.items()}):
-                    result = await func(*args, **kwargs)
-                    duration = (time.time() - start_time) * 1000
-                    logger.log_response(tool_name, result, duration_ms=round(duration, 2))
-                    return result
+                result = await func(*args, **kwargs)
+                logger.debug(f"✓ {operation_name}")
+                return result
             except Exception as e:
-                duration = (time.time() - start_time) * 1000
-                logger.error(f"Tool {tool_name} failed", error=e, duration_ms=round(duration, 2))
+                logger.error(f"✗ {operation_name}: {e}")
                 raise
-                
-        @functools.wraps(func)
-        def sync_wrapper(*args, **kwargs):
-            tool_name = func.__name__
-            start_time = time.time()
-            logger.log_request(tool_name, kwargs)
-            
-            try:
-                with logger.tool_span(tool_name, **{k: str(v)[:100] for k, v in kwargs.items()}):
-                    result = func(*args, **kwargs)
-                    duration = (time.time() - start_time) * 1000
-                    logger.log_response(tool_name, result, duration_ms=round(duration, 2))
-                    return result
-            except Exception as e:
-                duration = (time.time() - start_time) * 1000
-                logger.error(f"Tool {tool_name} failed", error=e, duration_ms=round(duration, 2))
-                raise
-        
-        import asyncio
-        if asyncio.iscoroutinefunction(func):
-            return async_wrapper
-        return sync_wrapper
+
+        return wrapper
+
     return decorator
 
 
-# ═══════════════════════════════════════════════════════════════
-# Convenience Exports
-# ═══════════════════════════════════════════════════════════════
-info = logfire.info
-debug = logfire.debug
-warning = logfire.warn
-error = logfire.error
-span = logfire.span
+def trace_sync_operation(operation_name: str):
+    """Decorator to trace sync function execution."""
+
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            logger = get_logger(func.__module__)
+            logger.debug(f"→ {operation_name}")
+            try:
+                result = func(*args, **kwargs)
+                logger.debug(f"✓ {operation_name}")
+                return result
+            except Exception as e:
+                logger.error(f"✗ {operation_name}: {e}")
+                raise
+
+        return wrapper
+
+    return decorator

@@ -1,6 +1,1 @@
-"""
-Shopping AI Assistant Package
-"""
-
-__version__ = "1.0.0"
-__author__ = "Your Name"
+# Empty file to mark src as a Python package

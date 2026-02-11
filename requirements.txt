@@ -1,14 +1,43 @@
-aiohttp==3.13.2
-elasticsearch==9.2.0
-langchain_core==1.1.1
-langchain_nvidia_ai_endpoints==1.0.0
-langchain_ollama==1.0.0
-langchain_openai==1.1.0
-langgraph==1.0.4
-logfire==4.16.0
-mcp==1.23.1
-numpy==2.3.5
-python-dotenv==1.2.1
-sentence_transformers==5.1.0
-typing_extensions==4.15.0
-uvicorn==0.38.0
+# Core Framework
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-openai>=0.2.0
+langchain-nvidia-ai-endpoints>=0.3.0
+
+# Web Framework
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+httpx>=0.28.0
+pydantic>=2.10.0
+pydantic-settings>=2.6.0
+
+# AI/ML
+sentence-transformers>=3.3.0
+numpy>=2.0.0
+torch>=2.5.0
+
+# Database Clients
+redis>=5.2.0
+elasticsearch>=8.17.0
+
+# Monitoring & Logging
+logfire[fastapi,httpx]>=2.0.0
+
+# MCP (Model Context Protocol)
+mcp>=1.0.0
+
+# Utilities
+python-dotenv>=1.0.1
+tenacity>=9.0.0
+orjson>=3.10.0
+
+# Testing
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+pytest-cov>=6.0.0
+httpx>=0.28.0
+
+# Development
+black>=24.10.0
+isort>=5.13.0
+mypy>=1.13.0
