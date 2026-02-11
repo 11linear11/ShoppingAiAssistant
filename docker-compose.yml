@@ -27,7 +27,10 @@ services:
       backend:
         condition: service_healthy
     networks:
-      - app-network
+      app-network:
+        aliases:
+          - frontend
+          - assistant-frontend
     restart: unless-stopped
 
   # ── Backend (FastAPI Gateway) ─────────────────────────────
@@ -44,10 +47,10 @@ services:
       DEBUG_MODE: "false"
       DEBUG: "false"
       # ── MCP server URLs (docker internal network) ──
-      MCP_INTERPRET_URL: "http://interpret:5004"
-      MCP_SEARCH_URL: "http://search:5002"
+      MCP_INTERPRET_URL: "http://assistant-interpret:5004"
+      MCP_SEARCH_URL: "http://assistant-search:5002"
       # ── Redis (for agent response cache) ──
-      REDIS_HOST: "redis"
+      REDIS_HOST: "assistant-redis"
       # ── Logfire (observability) ──
       USE_LOGFIRE: "${USE_LOGFIRE:-false}"
       LOGFIRE_TOKEN: "${LOGFIRE_TOKEN:-}"
@@ -70,7 +73,10 @@ services:
       redis:
         condition: service_healthy
     networks:
-      - app-network
+      app-network:
+        aliases:
+          - backend
+          - assistant-backend
     logging:
       driver: json-file
       options:
@@ -106,7 +112,10 @@ services:
       - ./src:/app/src
       - ./logs:/app/logs
     networks:
-      - app-network
+      app-network:
+        aliases:
+          - interpret
+          - assistant-interpret
     logging:
       driver: json-file
       options:
@@ -126,7 +135,8 @@ services:
     env_file: .env
     environment:
       DEBUG_MODE: "false"
-      REDIS_HOST: "redis"
+      REDIS_HOST: "assistant-redis"
+      MCP_EMBEDDING_URL: "http://assistant-embedding:5003"
       LOGFIRE_SERVICE_NAME: "shopping-assistant-search"
       PIPELINE_SERVICE_NAME: "shopping-assistant-search"
       DEBUG_LOG: "${DEBUG_LOG:-false}"
@@ -138,7 +148,10 @@ services:
       redis:
         condition: service_healthy
     networks:
-      - app-network
+      app-network:
+        aliases:
+          - search
+          - assistant-search
     logging:
       driver: json-file
       options:
@@ -168,7 +181,10 @@ services:
       - ./src:/app/src
       - ./logs:/app/logs
     networks:
-      - app-network
+      app-network:
+        aliases:
+          - embedding
+          - assistant-embedding
     logging:
       driver: json-file
       options:
@@ -186,7 +202,10 @@ services:
       - redis_data:/data
     command: redis-server --appendonly yes
     networks:
-      - app-network
+      app-network:
+        aliases:
+          - redis
+          - assistant-redis
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
