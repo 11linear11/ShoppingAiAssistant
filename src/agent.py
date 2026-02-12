@@ -668,10 +668,10 @@ class ShoppingAgent:
         if provider == "openrouter":
             provider_order = self._resolve_openrouter_provider_order()
             if provider_order:
-                llm_kwargs["model_kwargs"] = {
-                    "extra_body": {
-                        "provider": {"order": provider_order},
-                    },
+                # OpenRouter expects provider routing inside request extra_body.
+                # Passing "provider" as a top-level field causes OpenAI client errors.
+                llm_kwargs["extra_body"] = {
+                    "provider": {"order": provider_order},
                 }
                 log_agent("OpenRouter provider routing enabled", {"order": provider_order})
 
