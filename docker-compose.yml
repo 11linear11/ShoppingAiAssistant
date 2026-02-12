@@ -112,6 +112,10 @@ services:
     environment:
       DEBUG_MODE: "false"
       HF_HOME: /root/.cache/huggingface
+      # Force interpret LLM traffic through OpenRouter while keeping a Llama model.
+      GITHUB_TOKEN: "${OPEN_ROUTERS_API_KEY}"
+      GITHUB_BASE_URL: "${INTERPRET_OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}"
+      GITHUB_MODEL: "${INTERPRET_OPENROUTER_MODEL:-meta-llama/llama-3.3-70b-instruct}"
       LOGFIRE_SERVICE_NAME: "shopping-assistant-interpret"
       PIPELINE_SERVICE_NAME: "shopping-assistant-interpret"
       DEBUG_LOG: "${DEBUG_LOG:-false}"

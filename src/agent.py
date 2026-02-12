@@ -43,8 +43,9 @@ class Settings(BaseSettings):
     agent_model: str = Field(default="", alias="AGENT_MODEL")
 
     openrouter_api_key: str = Field(default="", alias="OPEN_ROUTERS_API_KEY")
-    openrouter_model: str = Field(default="qwen/qwen-2.5-72b-instruct", alias="OPENROUTER_MODEL")
+    openrouter_model: str = Field(default="qwen/qwen2.5-vl-32b-instruct", alias="OPENROUTER_MODEL")
     openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL")
+    openrouter_provider_order: str = Field(default="", alias="OPENROUTER_PROVIDER_ORDER")
 
     # Groq fallback
     groq_api_key: str = Field(default="", alias="GROQ_API_KEY")
@@ -627,15 +628,53 @@ class ShoppingAgent:
 
         return provider, api_key, base_url, model
 
+    @staticmethod
+    def _resolve_openrouter_provider_order() -> list[str]:
+        """
+        Parse OPENROUTER_PROVIDER_ORDER into provider names for OpenRouter routing.
+        Example: "deepinfra,groq"
+        """
+        raw = (settings.openrouter_provider_order or "").strip()
+        if not raw:
+            return []
+
+        mapping = {
+            "deepinfra": "DeepInfra",
+            "groq": "Groq",
+            "together": "Together",
+            "togetherai": "Together",
+            "openai": "OpenAI",
+            "fireworks": "Fireworks",
+            "novita": "Novita",
+        }
+        providers: list[str] = []
+        for part in raw.split(","):
+            value = part.strip()
+            if not value:
+                continue
+            providers.append(mapping.get(value.lower(), value))
+        return providers
+
     def __init__(self):
         provider, api_key, base_url, model = self._resolve_model_config()
         log_agent("Initializing ShoppingAgent", {"provider": provider, "model": model})
 
+        llm_kwargs = {
+            "api_key": api_key,
+            "base_url": base_url,
+            "model": model,
+            "temperature": 0.3,
+        }
+        if provider == "openrouter":
+            provider_order = self._resolve_openrouter_provider_order()
+            if provider_order:
+                llm_kwargs["model_kwargs"] = {
+                    "provider": {"order": provider_order},
+                }
+                log_agent("OpenRouter provider routing enabled", {"order": provider_order})
+
         self.llm = ChatOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            temperature=0.3,
+            **llm_kwargs,
         )
         
         self.tools = [interpret_query, search_products, get_product_details]
