@@ -21,11 +21,15 @@ class FakeRouterAgent:
         self._final_result = final_result
         self.chat_called = False
         self.final_called = False
+        self.interpret_called = False
+        self.search_called = False
 
     async def interpret_message(self, message: str, session_id: str, context=None):
+        self.interpret_called = True
         return self._interpret_result
 
     async def search_from_params(self, search_params: dict, session_id: str, use_cache=None):
+        self.search_called = True
         return self._search_result
 
     async def final_rerank_direct(self, user_message: str, search_params: dict, search_rows: list[dict], top_n: int = 8):
@@ -64,6 +68,60 @@ def test_router_abstract_fastpath_skips_agent_chat(monkeypatch):
     assert result["metadata"]["query_type"] == "abstract"
     assert result["products"] == []
     assert "پیشنهادها" in result["response"]
+    assert service._agent.chat_called is False
+
+
+def test_router_smalltalk_fastpath_skips_interpret_and_search(monkeypatch):
+    service = AgentService()
+    service._initialized = True
+    service._agent = FakeRouterAgent(
+        interpret_result={"query_type": "direct", "searchable": True, "search_params": {"product": "test"}}
+    )
+    service._cache = AsyncMock()
+    service._cache.available = False
+
+    monkeypatch.setattr(agent_service_module.settings, "ff_router_enabled", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "ff_abstract_fastpath", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "ff_direct_fastpath", True, raising=False)
+
+    result = _run(service.chat("سلام خوبی؟", session_id="sess-chat"))
+    assert result["success"] is True
+    assert result["metadata"]["query_type"] == "chat"
+    assert result["metadata"]["router_route"] == "smalltalk_fastpath"
+    assert result["products"] == []
+    assert service._agent.interpret_called is False
+    assert service._agent.search_called is False
+    assert service._agent.chat_called is False
+
+
+def test_router_direct_vague_query_forces_clarification(monkeypatch):
+    service = AgentService()
+    service._initialized = True
+    service._agent = FakeRouterAgent(
+        interpret_result={
+            "query_type": "direct",
+            "searchable": True,
+            "search_params": {
+                "product": "یه چیزی گرم برای پوشیدن میخوام",
+                "intent": "browse",
+                "categories_fa": [],
+            },
+        },
+        search_result={"results": [{"id": "p1", "product_name": "شلوار", "price": 1200000}]},
+    )
+    service._cache = AsyncMock()
+    service._cache.available = False
+
+    monkeypatch.setattr(agent_service_module.settings, "ff_router_enabled", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "ff_abstract_fastpath", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "ff_direct_fastpath", True, raising=False)
+
+    result = _run(service.chat("یه چیزی گرم برای پوشیدن میخوام", session_id="sess-vague"))
+    assert result["success"] is True
+    assert result["metadata"]["query_type"] == "abstract"
+    assert result["metadata"]["router_route"] == "direct_to_clarification_guard"
+    assert result["products"] == []
+    assert service._agent.search_called is False
     assert service._agent.chat_called is False
 
 
@@ -115,6 +173,58 @@ def test_router_direct_fastpath_uses_search_and_sets_cache(monkeypatch):
     assert len(result["products"]) == 1
     assert service._cache.set.await_count == 1
     assert service._agent.chat_called is False
+
+
+def test_router_direct_fastpath_applies_hard_price_constraint(monkeypatch):
+    service = AgentService()
+    service._initialized = True
+    service._agent = FakeRouterAgent(
+        interpret_result={
+            "query_type": "direct",
+            "searchable": True,
+            "search_params": {
+                "product": "یخچال",
+                "intent": "browse",
+                "price_range": {"max": 10_000_000},
+                "persian_full_query": "یخچال زیر 10 میلیون",
+            },
+        },
+        search_result={
+            "results": [
+                {
+                    "id": "p1",
+                    "product_name": "یخچال 27 میلیونی",
+                    "brand_name": "A",
+                    "price": 27_000_000,
+                    "relevancy_score": 0.93,
+                },
+                {
+                    "id": "p2",
+                    "product_name": "یخچال 9 میلیونی",
+                    "brand_name": "B",
+                    "price": 9_500_000,
+                    "relevancy_score": 0.91,
+                },
+            ]
+        },
+    )
+    service._cache = AsyncMock()
+    service._cache.available = True
+    service._cache.get = AsyncMock(return_value=None)
+    service._cache.set = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(agent_service_module.settings, "ff_router_enabled", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "ff_abstract_fastpath", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "ff_direct_fastpath", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "ff_conditional_final_llm", False, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "direct_fastpath_rollout_percent", 100, raising=False)
+
+    result = _run(service.chat("یخچال زیر 10 میلیون", session_id="sess-constraint"))
+    assert result["success"] is True
+    assert len(result["products"]) == 1
+    assert result["products"][0]["name"] == "یخچال 9 میلیونی"
+    assert result["metadata"]["constraint_filter"]["dropped"] == 1
+    assert result["metadata"]["constraint_filter"]["max_price"] == 10_000_000.0
 
 
 def test_router_direct_fastpath_low_confidence_falls_back_to_agent(monkeypatch):

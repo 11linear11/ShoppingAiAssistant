@@ -94,6 +94,157 @@ class AgentService:
         except Exception:
             return default
 
+    def _is_smalltalk_message(self, message: str) -> bool:
+        """Detect pure social/greeting messages that should not hit search."""
+        normalized = self._normalize_text(message)
+        if not normalized:
+            return False
+
+        social_markers = {
+            "سلام",
+            "سلامم",
+            "سلام خوبی",
+            "خوبی",
+            "چطوری",
+            "روز بخیر",
+            "شب بخیر",
+            "صبح بخیر",
+            "ممنون",
+            "مرسی",
+            "تشکر",
+            "ممنونم",
+            "خداحافظ",
+            "فعلا",
+            "خسته نباشید",
+            "خودتو معرفی کن",
+            "خودتو معرفی میکنی",
+            "میشه خودتو معرفی کنی",
+        }
+        shopping_markers = {
+            "میخوام",
+            "می‌خوام",
+            "میخام",
+            "دنبال",
+            "بخر",
+            "خرید",
+            "قیمت",
+            "ارزون",
+            "ارزان",
+            "زیر",
+            "تومان",
+            "محصول",
+            "کالا",
+            "مدل",
+            "برند",
+        }
+
+        if any(marker in normalized for marker in shopping_markers):
+            return False
+        if normalized in social_markers:
+            return True
+        return any(
+            normalized.startswith(prefix)
+            for prefix in ("سلام", "خوبی", "چطوری", "ممنون", "مرسی", "خداحافظ")
+        )
+
+    def _build_smalltalk_response(self, message: str) -> str:
+        """Generate deterministic social response."""
+        normalized = self._normalize_text(message)
+        if "معرفی" in normalized:
+            return "من دستیار خرید شما هستم و کمک می‌کنم محصول مناسب پیدا کنید."
+        if any(token in normalized for token in ("ممنون", "مرسی", "تشکر")):
+            return "خواهش می‌کنم، خوشحال می‌شم کمکتون کنم."
+        if any(token in normalized for token in ("خداحافظ", "فعلا")):
+            return "خدانگهدار، هر زمان نیاز داشتید در خدمتم."
+        return "سلام، خوبم ممنون. بفرمایید دنبال چه محصولی هستید؟"
+
+    def _should_force_clarification(
+        self,
+        message: str,
+        query_type: str,
+        searchable: bool,
+        search_params: dict[str, Any],
+    ) -> bool:
+        """
+        Prevent generic vague requests from being treated as direct product searches.
+        """
+        if query_type != "direct" or not searchable:
+            return False
+
+        message_norm = self._normalize_text(message)
+        product_norm = self._normalize_text(str(search_params.get("product") or ""))
+        if not message_norm:
+            return False
+
+        vague_markers = {
+            "یه چیز",
+            "یک چیز",
+            "چیزی",
+            "نمیدونم چی",
+            "نمی‌دونم چی",
+            "یه مورد",
+            "برای هدیه",
+            "برای مهمونی",
+            "برای پوشیدن",
+        }
+        has_vague_language = any(marker in message_norm for marker in vague_markers)
+        categories = search_params.get("categories_fa") or []
+        has_specific_product = bool(product_norm) and ("چیز" not in product_norm)
+
+        if has_vague_language and not has_specific_product:
+            return True
+        if has_vague_language and product_norm == message_norm and not categories:
+            return True
+        return False
+
+    def _apply_hard_constraints(
+        self,
+        rows: list[dict[str, Any]],
+        search_params: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """
+        Enforce hard filters (price/brand) before returning results to the user.
+        """
+        if not rows:
+            return rows, {"enabled": True, "dropped": 0, "kept": 0}
+
+        price_range = search_params.get("price_range") or {}
+        min_price = self._safe_float(price_range.get("min"), default=0.0)
+        max_price = self._safe_float(price_range.get("max"), default=0.0)
+        brand = self._normalize_text(str(search_params.get("brand") or ""))
+
+        has_min = min_price > 0
+        has_max = max_price > 0
+        has_brand = bool(brand)
+        if not (has_min or has_max or has_brand):
+            return rows, {"enabled": False, "dropped": 0, "kept": len(rows)}
+
+        filtered: list[dict[str, Any]] = []
+        dropped = 0
+        for row in rows:
+            row_brand = self._normalize_text(str(row.get("brand_name") or row.get("brand") or ""))
+            raw_price = row.get("discount_price")
+            if raw_price in (None, "", 0, "0"):
+                raw_price = row.get("price")
+            price_value = self._safe_float(raw_price, default=0.0)
+
+            brand_ok = (not has_brand) or (brand in row_brand or row_brand in brand)
+            min_ok = (not has_min) or (price_value >= min_price)
+            max_ok = (not has_max) or (price_value <= max_price)
+            if brand_ok and min_ok and max_ok:
+                filtered.append(row)
+            else:
+                dropped += 1
+
+        return filtered, {
+            "enabled": True,
+            "dropped": dropped,
+            "kept": len(filtered),
+            "min_price": min_price if has_min else None,
+            "max_price": max_price if has_max else None,
+            "brand": brand if has_brand else None,
+        }
+
     def _tokenize_text(self, value: str) -> list[str]:
         """Tokenize text with light Persian stopword filtering."""
         stopwords = {
@@ -284,6 +435,22 @@ class AgentService:
         if not settings.ff_router_enabled:
             return None
 
+        if self._is_smalltalk_message(message):
+            return {
+                "success": True,
+                "response": self._build_smalltalk_response(message),
+                "session_id": session_id,
+                "products": [],
+                "metadata": {
+                    "query_type": "chat",
+                    "total_results": 0,
+                    "from_agent_cache": False,
+                    "from_router_fastpath": True,
+                    "router_route": "smalltalk_fastpath",
+                    "latency_breakdown_ms": timings,
+                },
+            }
+
         stage_start = perf_counter()
         try:
             interpret = await self.agent.interpret_message(message, session_id)
@@ -298,6 +465,23 @@ class AgentService:
         searchable = bool(interpret.get("searchable"))
         search_params = interpret.get("search_params") or {}
         clarification = interpret.get("clarification") or {}
+
+        if self._should_force_clarification(message, query_type, searchable, search_params):
+            question = "دقیق‌تر بفرمایید چه محصولی مدنظرتونه تا بهتر راهنمایی کنم."
+            return {
+                "success": True,
+                "response": question,
+                "session_id": session_id,
+                "products": [],
+                "metadata": {
+                    "query_type": "abstract",
+                    "total_results": 0,
+                    "from_agent_cache": False,
+                    "from_router_fastpath": True,
+                    "router_route": "direct_to_clarification_guard",
+                    "latency_breakdown_ms": timings,
+                },
+            }
 
         # Abstract/unclear fastpath: respond from interpret clarification (no full agent loop).
         if (
@@ -364,6 +548,7 @@ class AgentService:
             timings["router_search_ms"] = int((perf_counter() - stage_start) * 1000)
 
             rows = search_result.get("results") or []
+            rows, constraint_meta = self._apply_hard_constraints(rows, search_params)
             stage_start = perf_counter()
             guard = self._evaluate_direct_fastpath(search_params, rows)
             timings["router_guard_ms"] = int((perf_counter() - stage_start) * 1000)
@@ -417,6 +602,7 @@ class AgentService:
                         meta={"success": True, "timeout_s": timeout_s, "top_n": top_n},
                     )
                     rows = final_llm.get("rows") or rows
+                    rows, constraint_meta = self._apply_hard_constraints(rows, search_params)
                     final_llm_meta = final_llm.get("meta") or {}
                     final_llm_meta["response"] = str(final_llm.get("response") or "").strip()
                     router_route = "direct_final_llm"
@@ -482,6 +668,7 @@ class AgentService:
                     "from_router_fastpath": True,
                     "router_route": router_route,
                     "router_guard": guard,
+                    "constraint_filter": constraint_meta,
                     "final_llm": final_llm_meta,
                     "latency_breakdown_ms": timings,
                 },

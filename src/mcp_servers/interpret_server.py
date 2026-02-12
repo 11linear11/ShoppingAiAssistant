@@ -385,6 +385,23 @@ class QueryInterpreter:
             },
         }
 
+    def _fallback_unclear_result(self, query: str, reason: str) -> dict[str, Any]:
+        """Safe fallback when LLM classification/extraction fails."""
+        normalized_reason = (reason or "classification_failed").strip()
+        return {
+            "query_type": "unclear",
+            "confidence": 0.0,
+            "reasoning": f"fallback:{normalized_reason}",
+            "product": None,
+            "brand": None,
+            "price_range": {"min": None, "max": None},
+            "intent": "browse",
+            "feeling": "",
+            "suggested_products": [],
+            "reference_type": None,
+            "reference_value": None,
+        }
+
     async def _classify_and_extract(self, query: str, context: dict) -> dict:
         """Use LLM to classify AND extract in one call."""
 
@@ -476,13 +493,15 @@ If a product name is mentioned, it's DIRECT - not ABSTRACT.
             if json_match:
                 return json.loads(json_match.group())
             else:
-                return {"query_type": "direct", "product": query}
+                log_interpret("LLM JSON not found, using safe fallback", {"query": query[:120]})
+                return self._fallback_unclear_result(query, "json_not_found")
 
         except json.JSONDecodeError:
-            return {"query_type": "direct", "product": query}
+            log_interpret("LLM JSON decode failed, using safe fallback", {"query": query[:120]})
+            return self._fallback_unclear_result(query, "json_decode_error")
         except Exception as e:
             log_error("INTERPRET", f"LLM classify/extract error: {e}", e)
-            return {"query_type": "direct", "product": query}
+            return self._fallback_unclear_result(query, "llm_exception")
 
     async def _build_direct_response(
         self, llm_result: dict, query: str
