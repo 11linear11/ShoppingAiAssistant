@@ -191,6 +191,7 @@ class AgentService:
 
         top_name = str(top_rows[0].get("product_name") or top_rows[0].get("name") or "")
         query_overlap = self._token_overlap_score(query, top_name)
+        query_token_count = len(self._tokenize_text(query))
         category_alignment = self._category_alignment_score(
             search_params.get("categories_fa") or [],
             top_rows,
@@ -216,7 +217,9 @@ class AgentService:
         if intent in {"find_cheapest", "find_best_value", "find_high_quality"}:
             required_margin = t2 * 0.5
 
-        has_margin = len(relevancies) < 2 or margin >= required_margin
+        has_strong_top1 = top1 >= max(t1 + 0.25, 0.85)
+        needs_margin_check = len(relevancies) >= 2 and query_token_count <= 2 and not has_strong_top1
+        has_margin = (not needs_margin_check) or margin >= required_margin
         accepted = bool(top1 >= t1 and has_margin and confidence >= min_conf)
 
         reason = "accepted" if accepted else "low_confidence"
@@ -234,6 +237,7 @@ class AgentService:
             "avg_top3_relevancy": round(avg_top3, 4),
             "query_overlap": round(query_overlap, 4),
             "category_alignment": round(category_alignment, 4),
+            "query_token_count": query_token_count,
             "thresholds": {
                 "t1": round(t1, 4),
                 "t2": round(required_margin, 4),
