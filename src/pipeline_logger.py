@@ -259,10 +259,11 @@ def log_pipeline(
     trace = get_current_trace()
     tid = trace_id or (trace.trace_id if trace else "no-trace")
 
-    # In non-debug mode keep only user requests and errors.
+    # In non-debug mode keep only user requests, latency summaries, and errors.
     if not DEBUG_LOG:
         is_user_request = stage == "AGENT" and message.startswith("USER_REQUEST")
-        if level < logging.ERROR and not is_user_request:
+        is_latency_summary = message.startswith("LATENCY_SUMMARY")
+        if level < logging.ERROR and not is_user_request and not is_latency_summary:
             return
     
     extra = {
@@ -449,6 +450,33 @@ def log_error(stage: str, message: str, error: Optional[Exception] = None):
         else None
     )
     log_pipeline(stage, f"❌ {message}", data, level=logging.ERROR, exc_info=error)
+
+
+def log_latency_summary(
+    stage: str,
+    component: str,
+    total_ms: int,
+    breakdown_ms: Optional[dict[str, int]] = None,
+    meta: Optional[dict[str, Any]] = None,
+):
+    """Log one compact latency summary event for downstream analysis."""
+    payload: dict[str, Any] = {
+        "component": component,
+        "total_ms": int(total_ms),
+    }
+    if breakdown_ms:
+        payload["breakdown_ms"] = {
+            key: int(value) for key, value in breakdown_ms.items()
+        }
+    if meta:
+        payload["meta"] = meta
+
+    log_pipeline(
+        stage,
+        "LATENCY_SUMMARY",
+        payload,
+        level=logging.INFO,
+    )
 
 
 # ============================================================================

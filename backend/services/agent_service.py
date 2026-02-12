@@ -10,6 +10,7 @@ import asyncio
 import json
 import re
 import uuid
+from time import perf_counter
 from datetime import datetime
 from typing import Optional
 
@@ -23,6 +24,7 @@ sys.path.insert(0, str(project_root))
 from src.agent import ShoppingAgent
 from src.agent_cache import AgentResponseCache
 from src.logging_config import get_logger
+from src.pipeline_logger import log_latency_summary
 from backend.api.schemas import ProductInfo, ChatMetadata
 from backend.core.config import settings
 
@@ -89,7 +91,12 @@ class AgentService:
         Returns:
             Dictionary with response, products, and metadata
         """
+        request_start = perf_counter()
+        timings: dict[str, int] = {}
+
+        stage_start = perf_counter()
         await self.initialize()
+        timings["initialize_ms"] = int((perf_counter() - stage_start) * 1000)
         
         start_time = datetime.now()
         
@@ -98,35 +105,55 @@ class AgentService:
         
         # ── Level 2: Agent Response Cache check ────────────────────
         if self._cache and self._cache.available:
+            cache_lookup_start = perf_counter()
             cached = await self._cache.get(message)
+            timings["agent_cache_lookup_ms"] = int((perf_counter() - cache_lookup_start) * 1000)
             if cached is not None:
                 took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
                 # Overwrite timing with actual cache-hit time
                 if "metadata" in cached:
                     cached["metadata"]["took_ms"] = took_ms
                     cached["metadata"]["from_agent_cache"] = True
+                    cached["metadata"]["latency_breakdown_ms"] = timings
                 cached["session_id"] = session_id
+                log_latency_summary(
+                    "AGENT",
+                    "agent_service.chat",
+                    int((perf_counter() - request_start) * 1000),
+                    breakdown_ms=timings,
+                    meta={"cache": "hit", "query_type": cached.get("metadata", {}).get("query_type")},
+                )
                 logger.info(f"Agent cache HIT ({took_ms}ms) for: {message[:50]}")
                 return cached
+        else:
+            timings["agent_cache_lookup_ms"] = 0
         
         # ── Cache miss → full pipeline ─────────────────────────────
         try:
             # Call agent with timeout
+            stage_start = perf_counter()
             response, session_id = await asyncio.wait_for(
                 self.agent.chat(message, session_id),
                 timeout=timeout,
             )
+            timings["agent_chat_ms"] = int((perf_counter() - stage_start) * 1000)
             
             took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
             
             # Extract products from response (if any)
+            stage_start = perf_counter()
             products = self._extract_products(response)
+            timings["extract_products_ms"] = int((perf_counter() - stage_start) * 1000)
             
             # Clean response text (remove product details if extracted)
+            stage_start = perf_counter()
             clean_response = self._clean_response_text(response, products)
+            timings["clean_response_ms"] = int((perf_counter() - stage_start) * 1000)
             
             # Determine query type
+            stage_start = perf_counter()
             query_type = self._detect_query_type(response, products)
+            timings["detect_query_type_ms"] = int((perf_counter() - stage_start) * 1000)
             
             result = {
                 "success": True,
@@ -138,6 +165,7 @@ class AgentService:
                     "query_type": query_type,
                     "total_results": len(products) if products else None,
                     "from_agent_cache": False,
+                    "latency_breakdown_ms": timings,
                 },
             }
             
@@ -152,15 +180,41 @@ class AgentService:
                 )
             )
             if self._cache and self._cache.available and is_cacheable:
+                stage_start = perf_counter()
                 await self._cache.set(message, result)
+                timings["agent_cache_set_ms"] = int((perf_counter() - stage_start) * 1000)
                 logger.info(f"Agent cache SET ({len(products)} products) for: {message[:50]}")
             elif self._cache and products and not is_cacheable:
                 logger.info(f"Agent cache SKIP (query_type={query_type}) for: {message[:50]}")
+                timings["agent_cache_set_ms"] = 0
+            else:
+                timings["agent_cache_set_ms"] = 0
+
+            result["metadata"]["latency_breakdown_ms"] = timings
+            log_latency_summary(
+                "AGENT",
+                "agent_service.chat",
+                int((perf_counter() - request_start) * 1000),
+                breakdown_ms=timings,
+                meta={
+                    "cache": "miss",
+                    "query_type": query_type,
+                    "success": True,
+                    "products": len(products),
+                },
+            )
             
             return result
             
         except asyncio.TimeoutError:
             took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            log_latency_summary(
+                "AGENT",
+                "agent_service.chat",
+                int((perf_counter() - request_start) * 1000),
+                breakdown_ms=timings,
+                meta={"cache": "miss", "query_type": "timeout", "success": False},
+            )
             return {
                 "success": False,
                 "response": "متأسفانه پاسخگویی بیش از حد طول کشید. لطفاً دوباره تلاش کنید.",
@@ -171,10 +225,18 @@ class AgentService:
                     "query_type": "timeout",
                     "total_results": 0,
                     "from_agent_cache": False,
+                    "latency_breakdown_ms": timings,
                 },
             }
         except Exception as e:
             took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            log_latency_summary(
+                "AGENT",
+                "agent_service.chat",
+                int((perf_counter() - request_start) * 1000),
+                breakdown_ms=timings,
+                meta={"cache": "miss", "query_type": "error", "success": False},
+            )
             return {
                 "success": False,
                 "response": f"متأسفانه مشکلی پیش اومد. لطفاً دوباره تلاش کنید.",
@@ -185,6 +247,7 @@ class AgentService:
                     "query_type": "error",
                     "total_results": 0,
                     "from_agent_cache": False,
+                    "latency_breakdown_ms": timings,
                 },
                 "error": str(e),
             }

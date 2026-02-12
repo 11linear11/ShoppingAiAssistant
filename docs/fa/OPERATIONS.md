@@ -71,3 +71,29 @@ pytest -q
 ### ۶.۳ فرانت JSON خام نشان می‌دهد
 الان fallback استخراج JSON در `frontend/src/App.jsx` پیاده‌سازی شده است.
 اگر بازگشت خطا رخ داد، format خروجی response را بررسی کن.
+
+## ۷) تحلیل تاخیر روی سرور
+برای اینکه bottleneck را در production ببینی، لازم نیست `DEBUG_LOG=true` باشد.
+رویدادهای `LATENCY_SUMMARY` در حالت non-debug هم ثبت می‌شوند.
+
+### ۷.۱ دیدن لاگ زنده
+```bash
+docker compose logs -f backend interpret search
+```
+
+### ۷.۲ دیدن فقط latency summary
+```bash
+grep -h "LATENCY_SUMMARY" logs/pipeline-*.log
+```
+
+### ۷.۳ گزارش bottleneck
+```bash
+python scripts/analyze_latency_logs.py --log-dir logs --top 30
+```
+
+برای تمرکز روی یک بخش:
+```bash
+python scripts/analyze_latency_logs.py --log-dir logs --component search.pipeline
+python scripts/analyze_latency_logs.py --log-dir logs --component interpret.pipeline
+python scripts/analyze_latency_logs.py --log-dir logs --component agent.chat
+```

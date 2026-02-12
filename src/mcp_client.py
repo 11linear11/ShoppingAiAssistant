@@ -8,9 +8,11 @@ Supports session management required by MCP Streamable HTTP transport.
 import asyncio
 import json
 import logging
+from time import perf_counter
 from typing import Any, Optional
 import httpx
 
+from src.pipeline_logger import log_latency_summary
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +95,7 @@ class MCPClient:
         # Retry up to 5 times with backoff (servers may still be loading)
         max_retries = 5
         last_error = None
+        init_start = perf_counter()
         for attempt in range(max_retries):
             try:
                 response = await client.post(
@@ -116,6 +119,16 @@ class MCPClient:
                         logger.info(f"MCP session initialized: {self._session_id}")
                     else:
                         logger.info("MCP initialized in stateless mode (no session id)")
+                    log_latency_summary(
+                        "AGENT",
+                        "mcp_client.initialize",
+                        int((perf_counter() - init_start) * 1000),
+                        meta={
+                            "base_url": self.base_url,
+                            "attempt": attempt + 1,
+                            "session_mode": "stateful" if self._session_id else "stateless",
+                        },
+                    )
                     return
                 else:
                     last_error = f"HTTP {response.status_code}: {response.text[:200]}"
@@ -134,6 +147,16 @@ class MCPClient:
                 await asyncio.sleep(wait)
         
         logger.error(f"Failed to initialize MCP session after {max_retries} attempts: {last_error}")
+        log_latency_summary(
+            "AGENT",
+            "mcp_client.initialize",
+            int((perf_counter() - init_start) * 1000),
+            meta={
+                "base_url": self.base_url,
+                "success": False,
+                "attempts": max_retries,
+            },
+        )
         raise Exception(f"MCP initialization failed after {max_retries} attempts: {last_error}")
     
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -150,7 +173,10 @@ class MCPClient:
         max_retries = 3
         for attempt in range(max_retries):
             # Ensure session is initialized
+            call_start = perf_counter()
+            init_start = perf_counter()
             await self._ensure_initialized()
+            init_ms = int((perf_counter() - init_start) * 1000)
             
             client = await self._get_client()
             
@@ -175,14 +201,29 @@ class MCPClient:
                 headers["mcp-session-id"] = self._session_id
             
             try:
+                request_start = perf_counter()
                 response = await client.post(
                     self.mcp_url,
                     json=request,
                     headers=headers,
                 )
+                request_ms = int((perf_counter() - request_start) * 1000)
             except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteError, httpx.RemoteProtocolError) as e:
                 logger.warning(
                     f"MCP call transport error on {tool_name} (attempt {attempt + 1}/{max_retries}): {e}"
+                )
+                log_latency_summary(
+                    "AGENT",
+                    "mcp_client.call_tool",
+                    int((perf_counter() - call_start) * 1000),
+                    breakdown_ms={"init_ms": init_ms},
+                    meta={
+                        "tool": tool_name,
+                        "base_url": self.base_url,
+                        "attempt": attempt + 1,
+                        "success": False,
+                        "error_type": e.__class__.__name__,
+                    },
                 )
                 self._session_id = None
                 self._initialized = False
@@ -191,19 +232,57 @@ class MCPClient:
                     continue
                 raise Exception(f"MCP transport error while calling {tool_name}: {e}") from e
             
-            # Handle session expiration (404) - reset and retry only when session mode is active
-            if self._session_id and response.status_code == 404 and attempt < max_retries - 1:
-                logger.warning(f"MCP session expired (404), re-initializing... (attempt {attempt + 1})")
+            # Handle possible session expiration (404) - reset and retry.
+            if response.status_code == 404 and attempt < max_retries - 1:
+                logger.warning(f"MCP session not valid (404), re-initializing... (attempt {attempt + 1})")
                 self._session_id = None
                 self._initialized = False
                 continue
             
             # Handle SSE response format (MCP returns SSE)
             if "text/event-stream" in response.headers.get("content-type", ""):
-                return self._parse_sse_response(response.text)
+                parse_start = perf_counter()
+                parsed = self._parse_sse_response(response.text)
+                parse_ms = int((perf_counter() - parse_start) * 1000)
+                log_latency_summary(
+                    "AGENT",
+                    "mcp_client.call_tool",
+                    int((perf_counter() - call_start) * 1000),
+                    breakdown_ms={
+                        "init_ms": init_ms,
+                        "http_request_ms": request_ms,
+                        "parse_ms": parse_ms,
+                    },
+                    meta={
+                        "tool": tool_name,
+                        "base_url": self.base_url,
+                        "attempt": attempt + 1,
+                        "content_type": "text/event-stream",
+                    },
+                )
+                return parsed
             
             if response.status_code == 200:
-                return self._parse_json_response(response.text)
+                parse_start = perf_counter()
+                parsed = self._parse_json_response(response.text)
+                parse_ms = int((perf_counter() - parse_start) * 1000)
+                log_latency_summary(
+                    "AGENT",
+                    "mcp_client.call_tool",
+                    int((perf_counter() - call_start) * 1000),
+                    breakdown_ms={
+                        "init_ms": init_ms,
+                        "http_request_ms": request_ms,
+                        "parse_ms": parse_ms,
+                    },
+                    meta={
+                        "tool": tool_name,
+                        "base_url": self.base_url,
+                        "attempt": attempt + 1,
+                        "status_code": response.status_code,
+                    },
+                )
+                return parsed
             
             raise Exception(f"MCP request failed: HTTP {response.status_code} - {response.text}")
         

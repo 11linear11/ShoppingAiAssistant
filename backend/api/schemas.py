@@ -70,6 +70,9 @@ class ChatMetadata(BaseModel):
     cached_at: Optional[str] = Field(
         None, description="ISO timestamp of when this response was cached"
     )
+    latency_breakdown_ms: Optional[dict[str, int]] = Field(
+        None, description="Per-stage latency breakdown in milliseconds"
+    )
 
 
 class ChatResponse(BaseModel):

@@ -12,6 +12,7 @@ import asyncio
 import json
 import re
 import sys
+from time import perf_counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ from src.pipeline_logger import (
     TraceContext,
     log_interpret,
     log_error,
+    log_latency_summary,
     reset_current_trace,
     set_current_trace,
     trace_stage,
@@ -207,22 +209,44 @@ class QueryInterpreter:
         4. Match categories (for direct queries)
         """
         context = context or {}
+        total_start = perf_counter()
+        timings: dict[str, int] = {}
 
         log_interpret("📥 Received query", {"query": query, "session": session_id})
 
         # Normalize input
+        normalize_start = perf_counter()
         with trace_stage("INTERPRET", "Normalize Persian text"):
             normalized = self._normalize_persian(query)
             log_interpret(
                 "Normalized", {"original": query, "normalized": normalized}
             )
+        timings["normalize_ms"] = int((perf_counter() - normalize_start) * 1000)
+
+        def _log_summary(query_type: str, searchable: bool):
+            log_latency_summary(
+                "INTERPRET",
+                "interpret.pipeline",
+                int((perf_counter() - total_start) * 1000),
+                breakdown_ms=timings,
+                meta={
+                    "query_type": query_type,
+                    "searchable": searchable,
+                },
+            )
 
         # Quick check: is it just a number? (follow-up selection)
         if normalized.strip().isdigit():
             log_interpret("Detected number selection", {"number": normalized})
-            return self._handle_number_selection(normalized.strip(), context)
+            response = self._handle_number_selection(normalized.strip(), context)
+            _log_summary(
+                query_type=response.get("query_type", "follow_up"),
+                searchable=bool(response.get("searchable")),
+            )
+            return response
 
         # LLM Classification + Extraction
+        llm_start = perf_counter()
         with trace_stage("INTERPRET", "LLM Classification"):
             llm_result = await self._classify_and_extract(normalized, context)
             log_interpret(
@@ -233,6 +257,7 @@ class QueryInterpreter:
                     "confidence": llm_result.get("confidence"),
                 },
             )
+        timings["llm_classification_ms"] = int((perf_counter() - llm_start) * 1000)
 
         # Process based on type
         query_type_str = llm_result.get("query_type", "direct")
@@ -242,7 +267,9 @@ class QueryInterpreter:
         )
 
         if query_type_str == "direct":
+            build_start = perf_counter()
             response = await self._build_direct_response(llm_result, normalized)
+            timings["build_response_ms"] = int((perf_counter() - build_start) * 1000)
             log_interpret(
                 "✅ DIRECT response",
                 {
@@ -252,10 +279,16 @@ class QueryInterpreter:
                     ),
                 },
             )
+            _log_summary(
+                query_type=response.get("query_type", "direct"),
+                searchable=bool(response.get("searchable")),
+            )
             return response
 
         elif query_type_str == "abstract":
+            build_start = perf_counter()
             response = self._build_abstract_response(llm_result, normalized)
+            timings["build_response_ms"] = int((perf_counter() - build_start) * 1000)
             log_interpret(
                 "✅ ABSTRACT response",
                 {
@@ -267,19 +300,35 @@ class QueryInterpreter:
                     ]
                 },
             )
+            _log_summary(
+                query_type=response.get("query_type", "abstract"),
+                searchable=bool(response.get("searchable")),
+            )
             return response
 
         elif query_type_str == "follow_up":
+            build_start = perf_counter()
             response = self._build_followup_response(llm_result, context)
+            timings["build_response_ms"] = int((perf_counter() - build_start) * 1000)
             log_interpret(
                 "✅ FOLLOW_UP response",
                 {"session_update": response.get("session_update")},
             )
+            _log_summary(
+                query_type=response.get("query_type", "follow_up"),
+                searchable=bool(response.get("searchable")),
+            )
             return response
 
         else:  # UNCLEAR
+            build_start = perf_counter()
             response = self._build_unclear_response(llm_result)
+            timings["build_response_ms"] = int((perf_counter() - build_start) * 1000)
             log_interpret("✅ UNCLEAR response")
+            _log_summary(
+                query_type=response.get("query_type", "unclear"),
+                searchable=bool(response.get("searchable")),
+            )
             return response
 
     def _normalize_persian(self, text: str) -> str:
@@ -413,7 +462,8 @@ If a product name is mentioned, it's DIRECT - not ABSTRACT.
         """Build response for DIRECT queries."""
 
         product = llm_result.get("product", query)
-        categories = await self._match_categories(product)
+        with trace_stage("INTERPRET", "Category matching"):
+            categories = await self._match_categories(product)
 
         return {
             "query_type": "direct",

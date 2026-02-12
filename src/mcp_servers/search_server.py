@@ -16,10 +16,10 @@ import json
 import re
 import sys
 import uuid
+from time import perf_counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -39,6 +39,7 @@ from src.pipeline_logger import (
     log_cache,
     log_embed,
     log_error,
+    log_latency_summary,
     reset_current_trace,
     set_current_trace,
     trace_stage,
@@ -158,7 +159,7 @@ class SearchEngine:
 
     def __init__(self, llm_client: LangChainLLM):
         self.llm = llm_client
-        self.http_client = httpx.AsyncClient(timeout=10.0)
+        self.http_client = httpx.AsyncClient(timeout=settings.search_timeout)
         self._brand_scores: dict[str, float] = {}
         self._redis: Optional[aioredis.Redis] = None
 
@@ -199,7 +200,8 @@ class SearchEngine:
         use_semantic: bool = True,
     ) -> dict[str, Any]:
         """Execute full search pipeline."""
-        start_time = datetime.now()
+        pipeline_start = perf_counter()
+        timings: dict[str, int] = {}
 
         if settings.debug_mode:
             use_cache = False
@@ -218,78 +220,113 @@ class SearchEngine:
             "intent": intent,
         })
 
+        def _build_result(
+            *,
+            total_hits: int,
+            results: list[dict[str, Any]],
+            from_cache: bool,
+        ) -> dict[str, Any]:
+            took_ms = int((perf_counter() - pipeline_start) * 1000)
+            return {
+                "success": True,
+                "query": display_query,
+                "total_hits": total_hits,
+                "results": results,
+                "took_ms": took_ms,
+                "from_cache": from_cache,
+                "latency_breakdown_ms": timings,
+            }
+
+        def _log_summary(result: dict[str, Any], cache_path: str):
+            log_latency_summary(
+                "SEARCH",
+                "search.pipeline",
+                result.get("took_ms", 0),
+                breakdown_ms=timings,
+                meta={
+                    "session_id": session_id[:8],
+                    "intent": intent,
+                    "hits": result.get("total_hits", 0),
+                    "from_cache": result.get("from_cache", False),
+                    "cache_path": cache_path,
+                },
+            )
+
         # Check negative cache first (known no-results query)
         if use_cache:
+            stage_start = perf_counter()
             is_negative = await self._check_negative_cache(product_key, intent)
+            timings["negative_cache_check_ms"] = int((perf_counter() - stage_start) * 1000)
             if is_negative:
-                took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
-                return {
-                    "success": True,
-                    "query": display_query,
-                    "total_hits": 0,
-                    "results": [],
-                    "took_ms": took_ms,
-                    "from_cache": True,
-                }
+                result = _build_result(total_hits=0, results=[], from_cache=True)
+                _log_summary(result, cache_path="negative_cache_hit")
+                return result
 
         # Check cache
         if use_cache:
+            cache_lookup_ms = 0
             for cache_lookup_key in cache_lookup_keys:
+                stage_start = perf_counter()
                 cached = await self._check_cache(cache_lookup_key)
+                cache_lookup_ms += int((perf_counter() - stage_start) * 1000)
                 if cached:
-                    took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
-                    return {
-                        "success": True,
-                        "query": display_query,
-                        "total_hits": len(cached),
-                        "results": cached,
-                        "took_ms": took_ms,
-                        "from_cache": True,
-                    }
+                    timings["search_cache_lookup_ms"] = cache_lookup_ms
+                    result = _build_result(
+                        total_hits=len(cached),
+                        results=cached,
+                        from_cache=True,
+                    )
+                    _log_summary(result, cache_path="search_cache_hit")
+                    return result
+            timings["search_cache_lookup_ms"] = cache_lookup_ms
 
             lock_owner = uuid.uuid4().hex
+            stage_start = perf_counter()
             lock_key, lock_acquired = await self._acquire_cache_lock(primary_cache_lookup_key, lock_owner)
+            timings["cache_lock_ms"] = int((perf_counter() - stage_start) * 1000)
             if not lock_acquired:
+                stage_start = perf_counter()
                 warmed = await self._wait_for_warm_cache(primary_cache_lookup_key)
+                timings["warm_cache_wait_ms"] = int((perf_counter() - stage_start) * 1000)
                 if warmed is not None:
-                    took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
-                    return {
-                        "success": True,
-                        "query": display_query,
-                        "total_hits": len(warmed),
-                        "results": warmed,
-                        "took_ms": took_ms,
-                        "from_cache": True,
-                    }
+                    result = _build_result(
+                        total_hits=len(warmed),
+                        results=warmed,
+                        from_cache=True,
+                    )
+                    _log_summary(result, cache_path="warm_cache_hit")
+                    return result
 
         try:
             # Generate DSL
+            stage_start = perf_counter()
             dsl = await self.generate_dsl(search_params)
+            timings["dsl_generation_ms"] = int((perf_counter() - stage_start) * 1000)
 
             # Execute search
+            stage_start = perf_counter()
             raw_results = await self._execute_search(dsl)
+            timings["es_search_ms"] = int((perf_counter() - stage_start) * 1000)
 
             if not raw_results:
                 if use_cache:
+                    stage_start = perf_counter()
                     await self._set_negative_cache(product_key, intent)
-                took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
-                return {
-                    "success": True,
-                    "query": display_query,
-                    "total_hits": 0,
-                    "results": [],
-                    "took_ms": took_ms,
-                    "from_cache": False,
-                }
+                    timings["negative_cache_set_ms"] = int((perf_counter() - stage_start) * 1000)
+                result = _build_result(total_hits=0, results=[], from_cache=False)
+                _log_summary(result, cache_path="miss_no_results")
+                return result
 
             # Rerank results with search query for relevancy filtering
             search_query = search_params.get("product") or search_params.get("persian_full_query", "")
+            stage_start = perf_counter()
             ranked_results = await self.rerank_results(
                 raw_results,
                 search_params.get("preferences", {}),
                 intent,
                 search_query=search_query,
             )
+            timings["rerank_ms"] = int((perf_counter() - stage_start) * 1000)
 
             # Log rerank summary
             if ranked_results:
@@ -302,18 +339,31 @@ class SearchEngine:
 
             # Update cache
             if use_cache and ranked_results:
+                stage_start = perf_counter()
                 await self._update_cache(primary_cache_lookup_key, ranked_results)
+                timings["search_cache_set_ms"] = int((perf_counter() - stage_start) * 1000)
 
-            took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
-
-            return {
-                "success": True,
-                "query": display_query,
-                "total_hits": len(ranked_results),
-                "results": ranked_results[: settings.result_limit],
-                "took_ms": took_ms,
-                "from_cache": False,
-            }
+            result = _build_result(
+                total_hits=len(ranked_results),
+                results=ranked_results[: settings.result_limit],
+                from_cache=False,
+            )
+            _log_summary(result, cache_path="miss_fresh")
+            return result
+        except Exception as e:
+            log_latency_summary(
+                "SEARCH",
+                "search.pipeline",
+                int((perf_counter() - pipeline_start) * 1000),
+                breakdown_ms=timings,
+                meta={
+                    "session_id": session_id[:8],
+                    "intent": intent,
+                    "success": False,
+                    "error_type": e.__class__.__name__,
+                },
+            )
+            raise
         finally:
             if use_cache and lock_key and lock_owner:
                 await self._release_cache_lock(lock_key, lock_owner)
@@ -555,15 +605,14 @@ class SearchEngine:
             if settings.es_password:
                 auth = (settings.es_user, settings.es_password)
 
-            async with httpx.AsyncClient(timeout=settings.search_timeout) as client:
-                response = await client.post(es_url, json=dsl, auth=auth)
+            response = await self.http_client.post(es_url, json=dsl, auth=auth)
 
-                if response.status_code != 200:
-                    log_error("SEARCH", f"Elasticsearch HTTP error: {response.status_code}")
-                    return []
+            if response.status_code != 200:
+                log_error("SEARCH", f"Elasticsearch HTTP error: {response.status_code}")
+                return []
 
-                data = response.json()
-                return data["hits"]["hits"]
+            data = response.json()
+            return data["hits"]["hits"]
 
         except Exception as e:
             log_error("SEARCH", f"Elasticsearch error: {e}", e)
@@ -578,29 +627,28 @@ class SearchEngine:
             if settings.es_password:
                 auth = (settings.es_user, settings.es_password)
 
-            async with httpx.AsyncClient(timeout=10) as client:
-                response = await client.get(es_url, auth=auth)
+            response = await self.http_client.get(es_url, auth=auth)
 
-                if response.status_code != 200:
-                    return {"success": False, "error": f"Product not found: {product_id}"}
+            if response.status_code != 200:
+                return {"success": False, "error": f"Product not found: {product_id}"}
 
-                data = response.json()
-                source = data.get("_source", {})
+            data = response.json()
+            source = data.get("_source", {})
 
-                return {
-                    "success": True,
-                    "product": {
-                        "id": product_id,
-                        "product_name": source.get("product_name", ""),
-                        "brand_name": source.get("brand_name", ""),
-                        "price": source.get("price", 0),
-                        "discount_price": source.get("discount_price"),
-                        "has_discount": source.get("has_discount", False),
-                        "discount_percentage": source.get("discount_percentage", 0),
-                        "category_name": source.get("category_name", ""),
-                        "product_url": source.get("product_url", ""),
-                    },
-                }
+            return {
+                "success": True,
+                "product": {
+                    "id": product_id,
+                    "product_name": source.get("product_name", ""),
+                    "brand_name": source.get("brand_name", ""),
+                    "price": source.get("price", 0),
+                    "discount_price": source.get("discount_price"),
+                    "has_discount": source.get("has_discount", False),
+                    "discount_percentage": source.get("discount_percentage", 0),
+                    "category_name": source.get("category_name", ""),
+                    "product_url": source.get("product_url", ""),
+                },
+            }
         except Exception as e:
             return {"success": False, "error": str(e)}
 

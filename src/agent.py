@@ -8,6 +8,7 @@ The LLM decides which tools to use based on user queries.
 import asyncio
 import json
 import uuid
+from time import perf_counter
 from contextvars import ContextVar
 from typing import Optional
 
@@ -25,6 +26,7 @@ from src.pipeline_logger import (
     log_agent,
     log_cache,
     log_error,
+    log_latency_summary,
     log_query_summary,
     trace_query,
 )
@@ -336,6 +338,7 @@ async def interpret_query(query: str) -> str:
         - search_params: extracted parameters (product, brand, price_range, intent)
     """
     try:
+        tool_start = perf_counter()
         current_trace = get_current_trace()
         trace_id = current_trace.trace_id if current_trace else None
         request_session_id = _get_active_session_id()
@@ -346,19 +349,37 @@ async def interpret_query(query: str) -> str:
         })
         
         client = get_interpret_client()
+        mcp_call_start = perf_counter()
         result = await client.interpret_query(
             query=query,
             session_id=request_session_id,
             context={"trace_id": trace_id} if trace_id else {},
         )
+        mcp_call_ms = int((perf_counter() - mcp_call_start) * 1000)
         
         log_agent("interpret_query result", {
             "searchable": result.get("searchable"),
             "query_type": result.get("query_type"),
         })
+        log_latency_summary(
+            "AGENT",
+            "agent.tool.interpret_query",
+            int((perf_counter() - tool_start) * 1000),
+            breakdown_ms={"mcp_call_ms": mcp_call_ms},
+            meta={
+                "searchable": result.get("searchable"),
+                "query_type": result.get("query_type"),
+            },
+        )
         
         return json.dumps(result, ensure_ascii=False, indent=2)
     except Exception as e:
+        log_latency_summary(
+            "AGENT",
+            "agent.tool.interpret_query",
+            int((perf_counter() - tool_start) * 1000),
+            meta={"success": False},
+        )
         log_error("AGENT", f"interpret_query failed: {e}", e)
         return json.dumps({"error": str(e), "searchable": False}, ensure_ascii=False)
 
@@ -396,6 +417,8 @@ async def search_products(
     global _llm_cached_response
 
     try:
+        tool_start = perf_counter()
+        timings: dict[str, int] = {}
         current_trace = get_current_trace()
         trace_id = current_trace.trace_id if current_trace else None
         request_session_id = _get_active_session_id()
@@ -444,7 +467,9 @@ async def search_products(
         
         # ── Level 3: Check if we have a cached LLM response for these search params ──
         if not settings.debug_mode:
+            cache_lookup_start = perf_counter()
             cached_llm = await _get_cached_llm_response(_last_search_cache_key)
+            timings["llm_cache_lookup_ms"] = int((perf_counter() - cache_lookup_start) * 1000)
             if cached_llm:
                 log_agent("⚡ LLM response cache HIT inside search_products — returning cached LLM output", {
                     "key": _last_search_cache_key,
@@ -454,16 +479,27 @@ async def search_products(
                 # Set flag so chat() won't re-store the same response
                 _llm_cache_hit = True
                 _llm_cached_response = cached_llm
+                log_latency_summary(
+                    "AGENT",
+                    "agent.tool.search_products",
+                    int((perf_counter() - tool_start) * 1000),
+                    breakdown_ms=timings,
+                    meta={"cache": "llm_hit", "product": product},
+                )
                 # Return the previous LLM-formatted response directly as tool output.
                 # The LLM will see this and pass it through as-is.
                 return f"✅ CACHED_RESPONSE:{cached_llm}"
+        else:
+            timings["llm_cache_lookup_ms"] = 0
         
         # ── Level 3 MISS: proceed with normal search ──
+        mcp_search_start = perf_counter()
         result = await client.search_products(
             search_params=search_params,
             session_id=request_session_id,
             use_cache=not settings.debug_mode,
         )
+        timings["mcp_search_ms"] = int((perf_counter() - mcp_search_start) * 1000)
         
         # Format results
         formatted_results = []
@@ -494,11 +530,29 @@ async def search_products(
             from_cache=result.get("from_cache", False),
             total_ms=output["took_ms"],
         )
+        log_latency_summary(
+            "AGENT",
+            "agent.tool.search_products",
+            int((perf_counter() - tool_start) * 1000),
+            breakdown_ms=timings,
+            meta={
+                "cache": "llm_miss",
+                "search_cache": result.get("from_cache", False),
+                "results": output["total_hits"],
+                "product": product,
+            },
+        )
         
         return json.dumps(output, ensure_ascii=False, indent=2)
         
     except Exception as e:
         _last_search_cache_key = None
+        log_latency_summary(
+            "AGENT",
+            "agent.tool.search_products",
+            int((perf_counter() - tool_start) * 1000),
+            meta={"success": False, "product": product},
+        )
         log_error("AGENT", f"search_products failed: {e}", e)
         return json.dumps({"error": str(e), "success": False, "results": []}, ensure_ascii=False)
 
@@ -617,6 +671,8 @@ class ShoppingAgent:
         global _last_search_cache_key
         global _llm_cache_hit
         global _llm_cached_response
+        chat_start = perf_counter()
+        timings: dict[str, int] = {}
         
         if not session_id:
             session_id = str(uuid.uuid4())
@@ -635,10 +691,12 @@ class ShoppingAgent:
 
                 # ── Full LLM pipeline (cache is checked inside search_products) ──
                 try:
+                    ainvoke_start = perf_counter()
                     result = await self.agent.ainvoke(
                         {"messages": [HumanMessage(content=message)]},
                         config=config,
                     )
+                    timings["react_ainvoke_ms"] = int((perf_counter() - ainvoke_start) * 1000)
 
                     response = ""
                     for msg in reversed(result.get("messages", [])):
@@ -660,21 +718,34 @@ class ShoppingAgent:
 
                     # ── Store LLM response in cache (keyed by search params) ──
                     # Only store if this was NOT a cache hit (avoid re-storing same data)
+                    llm_cache_was_hit = _llm_cache_hit
                     if _last_search_cache_key and not settings.debug_mode and not _llm_cache_hit:
                         log_agent("Storing LLM response in cache", {
                             "key": _last_search_cache_key,
                             "response_len": len(response),
                         })
+                        cache_store_start = perf_counter()
                         await _store_llm_response(_last_search_cache_key, response)
+                        timings["llm_cache_store_ms"] = int((perf_counter() - cache_store_start) * 1000)
                     elif _llm_cache_hit:
                         log_agent("Skipping cache store (Level 3 was HIT)", {
                             "key": _last_search_cache_key,
                         })
+                        timings["llm_cache_store_ms"] = 0
+                    else:
+                        timings["llm_cache_store_ms"] = 0
                     _last_search_cache_key = None
                     _llm_cache_hit = False
                     _llm_cached_response = None
 
                     log_agent("Response generated", {"session": session_id[:8], "response_len": len(response)})
+                    log_latency_summary(
+                        "AGENT",
+                        "agent.chat",
+                        int((perf_counter() - chat_start) * 1000),
+                        breakdown_ms=timings,
+                        meta={"success": True, "llm_cache_hit": bool(llm_cache_was_hit)},
+                    )
                     return response, session_id
 
                 except Exception as e:
@@ -708,6 +779,13 @@ class ShoppingAgent:
                                 "new_session": new_session_id[:8],
                                 "response_len": len(retry_response),
                             })
+                            log_latency_summary(
+                                "AGENT",
+                                "agent.chat",
+                                int((perf_counter() - chat_start) * 1000),
+                                breakdown_ms=timings,
+                                meta={"success": True, "retry_with_new_session": True},
+                            )
                             return retry_response, new_session_id
                         except Exception as retry_error:
                             log_error("AGENT", f"Retry after history reset failed: {retry_error}", retry_error)
@@ -715,6 +793,13 @@ class ShoppingAgent:
                             _active_session_id.reset(retry_token)
 
                     log_error("AGENT", f"Chat error: {e}", e)
+                    log_latency_summary(
+                        "AGENT",
+                        "agent.chat",
+                        int((perf_counter() - chat_start) * 1000),
+                        breakdown_ms=timings,
+                        meta={"success": False},
+                    )
                     return f"متأسفانه مشکلی پیش اومد: {str(e)}", session_id
         finally:
             _active_session_id.reset(session_token)

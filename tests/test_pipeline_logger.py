@@ -32,6 +32,21 @@ def test_non_debug_mode_keeps_only_user_requests_and_errors(monkeypatch):
     assert events[1][0] == logging.ERROR
 
 
+def test_non_debug_mode_keeps_latency_summary(monkeypatch):
+    pl = _reload_pipeline_logger(monkeypatch, debug_log=False)
+
+    events = []
+
+    def fake_log(level, message, extra=None, exc_info=None):
+        events.append((level, message, extra))
+
+    monkeypatch.setattr(pl.pipeline_logger, "log", fake_log)
+
+    pl.log_pipeline("SEARCH", "LATENCY_SUMMARY", {"component": "x", "total_ms": 12}, level=logging.INFO)
+    assert len(events) == 1
+    assert events[0][1].startswith("LATENCY_SUMMARY")
+
+
 def test_debug_mode_logs_normal_events(monkeypatch):
     pl = _reload_pipeline_logger(monkeypatch, debug_log=True)
 
