@@ -141,3 +141,4 @@
 - نکته عملیاتی:
   - directهای با confidence بالا بدون LLM نهایی پاسخ می‌گیرند.
   - directهای مبهم/low-confidence به مسیر LLM فعلی fallback می‌شوند.
+  - rollout فاز ۵ با درصد واقعی قابل کنترل است و شروع توصیه‌شده: `FINAL_LLM_ROLLOUT_PERCENT=10`
