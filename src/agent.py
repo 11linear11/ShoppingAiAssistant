@@ -669,7 +669,9 @@ class ShoppingAgent:
             provider_order = self._resolve_openrouter_provider_order()
             if provider_order:
                 llm_kwargs["model_kwargs"] = {
-                    "provider": {"order": provider_order},
+                    "extra_body": {
+                        "provider": {"order": provider_order},
+                    },
                 }
                 log_agent("OpenRouter provider routing enabled", {"order": provider_order})
 
