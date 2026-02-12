@@ -123,6 +123,7 @@
 - فاز ۱ (Quick Wins): انجام شده
 - فاز ۲ (Router تفکیک مسیر): انجام شده
 - فاز ۳ (Relevance Guard هیبرید): انجام شده در مسیر direct fastpath
+- فاز ۴ (LLM نهایی شرطی): انجام شده (fallback سبک با timeout=5s روی top-N)
 - تنظیمات فعال روی برنچ تست:
   - `FF_ROUTER_ENABLED=true`
   - `FF_ABSTRACT_FASTPATH=true`
@@ -131,6 +132,8 @@
   - `ROUTER_GUARD_T1=0.55`
   - `ROUTER_GUARD_T2=0.08`
   - `ROUTER_GUARD_MIN_CONFIDENCE=0.58`
+  - `FINAL_LLM_TIMEOUT_SECONDS=5`
+  - `FINAL_LLM_TOP_N=8`
 - نکته عملیاتی:
   - directهای با confidence بالا بدون LLM نهایی پاسخ می‌گیرند.
   - directهای مبهم/low-confidence به مسیر LLM فعلی fallback می‌شوند.
