@@ -10,6 +10,7 @@
 - URL سرویس‌ها: `MCP_INTERPRET_URL`, `MCP_SEARCH_URL`, `MCP_EMBEDDING_URL`
 - دیتاستورها: `REDIS_*`, `ELASTICSEARCH_*`
 - لاگ/مانیتورینگ: `DEBUG_LOG`, `PIPELINE_*`, `USE_LOGFIRE`
+- feature flags: `FF_INTERPRET_WARMUP`, `FF_INTENT_NORMALIZATION`, `FF_CATEGORY_EMBED_CACHE`
 
 ## ۲) حالت‌های اجرا
 ### ۲.۱ اجرای لوکال

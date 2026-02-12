@@ -44,6 +44,7 @@ from src.pipeline_logger import (
     set_current_trace,
     trace_stage,
 )
+from src.intent_utils import normalize_intent
 
 # Load .env
 from dotenv import load_dotenv
@@ -97,6 +98,7 @@ class Settings(BaseSettings):
     # Debug mode
     debug_mode: bool = Field(default=False, alias="DEBUG_MODE")
     use_semantic_search: bool = Field(default=False, alias="USE_SEMANTIC_SEARCH")
+    ff_intent_normalization: bool = Field(default=True, alias="FF_INTENT_NORMALIZATION")
 
     model_config = {"extra": "ignore"}
 
@@ -207,7 +209,8 @@ class SearchEngine:
             use_cache = False
 
         product_key = search_params.get("product") or search_params.get("persian_full_query", "")
-        intent = search_params.get("intent", "browse")
+        raw_intent = search_params.get("intent", "browse")
+        intent = normalize_intent(raw_intent) if settings.ff_intent_normalization else raw_intent
         display_query = search_params.get("persian_full_query", "")
         cache_lookup_keys = self._build_cache_lookup_keys(search_params, use_semantic=use_semantic)
         primary_cache_lookup_key = cache_lookup_keys[0] if cache_lookup_keys else ""
@@ -371,7 +374,8 @@ class SearchEngine:
     async def generate_dsl(self, search_params: dict[str, Any]) -> dict:
         """Generate Elasticsearch DSL query."""
         search_query = search_params.get("product") or search_params.get("persian_full_query", "")
-        intent = search_params.get("intent", "browse")
+        raw_intent = search_params.get("intent", "browse")
+        intent = normalize_intent(raw_intent) if settings.ff_intent_normalization else raw_intent
         brand = search_params.get("brand")
         categories = search_params.get("categories_fa", [])
         constraints = search_params.get("constraints", {})
@@ -431,7 +435,7 @@ class SearchEngine:
         # Adjust sort for intent
         if intent == "find_cheapest":
             dsl["sort"] = [{"price": "asc"}, "_score"]
-        elif intent in ["find_high_quality", "find_best_value"]:
+        elif intent in ["find_best_value", "find_high_quality"]:
             dsl["sort"] = ["_score", {"price": "asc"}]
 
         return dsl
@@ -512,6 +516,8 @@ class SearchEngine:
         """
         if not results:
             return []
+        if settings.ff_intent_normalization:
+            intent = normalize_intent(intent)
 
         price_sensitivity = preferences.get("price_sensitivity", 0.5)
         quality_sensitivity = preferences.get("quality_sensitivity", 0.5)
@@ -580,7 +586,7 @@ class SearchEngine:
         if intent == "find_cheapest":
             # First sort by relevancy (high), then by price (low)
             ranked.sort(key=lambda x: (-x.get("relevancy_score", 0), x.get("discount_price") or x.get("price", 0)))
-        elif intent == "find_high_quality":
+        elif intent in {"find_best_value", "find_high_quality"}:
             ranked.sort(
                 key=lambda x: (
                     -x.get("relevancy_score", 0),
@@ -684,7 +690,8 @@ class SearchEngine:
     def _build_cache_payload(self, search_params: dict[str, Any]) -> dict[str, Any]:
         """Build deterministic payload for search cache keys."""
         query = self._normalize_text(search_params.get("product") or search_params.get("persian_full_query", ""))
-        intent = search_params.get("intent", "browse")
+        raw_intent = search_params.get("intent", "browse")
+        intent = normalize_intent(raw_intent) if settings.ff_intent_normalization else raw_intent
         brand = self._normalize_text(search_params.get("brand", ""))
         categories = search_params.get("categories_fa", []) or []
         normalized_categories = sorted(
@@ -718,6 +725,8 @@ class SearchEngine:
 
     def _make_negative_cache_key(self, query: str, intent: str) -> str:
         """Build Redis key for negative cache."""
+        if settings.ff_intent_normalization:
+            intent = normalize_intent(intent)
         normalized = f"{self._normalize_text(query)}:{intent}"
         key_hash = hashlib.md5(normalized.encode()).hexdigest()
         return f"cache:v2:negative:{key_hash}"

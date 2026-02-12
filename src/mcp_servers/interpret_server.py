@@ -12,6 +12,7 @@ import asyncio
 import json
 import re
 import sys
+import time
 from time import perf_counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -39,6 +40,7 @@ from src.pipeline_logger import (
     set_current_trace,
     trace_stage,
 )
+from src.intent_utils import normalize_intent
 
 # Load .env from project root
 from dotenv import load_dotenv
@@ -74,6 +76,10 @@ class Settings(BaseSettings):
 
     # Debug mode - disables caching
     debug_mode: bool = Field(default=False, alias="DEBUG_MODE")
+    ff_intent_normalization: bool = Field(default=True, alias="FF_INTENT_NORMALIZATION")
+    ff_category_embed_cache: bool = Field(default=True, alias="FF_CATEGORY_EMBED_CACHE")
+    category_match_cache_ttl: int = Field(default=21600, alias="CATEGORY_MATCH_CACHE_TTL")
+    category_match_cache_max_size: int = Field(default=5000, alias="CATEGORY_MATCH_CACHE_MAX_SIZE")
 
     model_config = {"extra": "ignore"}
 
@@ -161,6 +167,7 @@ class QueryInterpreter:
         self.llm = llm
         self._category_embeddings: dict[str, list[float]] = {}
         self._category_names: list[str] = []
+        self._category_match_cache: dict[str, tuple[float, list[str]]] = {}
         
         # Local embedding model for category matching
         log_interpret("Loading embedding model", {"model": settings.embedding_model})
@@ -169,6 +176,27 @@ class QueryInterpreter:
             device="cpu"
         )
         log_interpret("Embedding model loaded", {"model": settings.embedding_model})
+
+    def _category_cache_get(self, key: str) -> Optional[list[str]]:
+        if not settings.ff_category_embed_cache:
+            return None
+        cached = self._category_match_cache.get(key)
+        if not cached:
+            return None
+        expires_at, value = cached
+        if expires_at < time.time():
+            self._category_match_cache.pop(key, None)
+            return None
+        return list(value)
+
+    def _category_cache_set(self, key: str, value: list[str]) -> None:
+        if not settings.ff_category_embed_cache:
+            return
+        if len(self._category_match_cache) >= settings.category_match_cache_max_size:
+            oldest_key = next(iter(self._category_match_cache))
+            self._category_match_cache.pop(oldest_key, None)
+        expires_at = time.time() + max(settings.category_match_cache_ttl, 1)
+        self._category_match_cache[key] = (expires_at, list(value))
 
     async def load_category_embeddings(
         self, filepath: str = "full_category_embeddings.json"
@@ -462,6 +490,8 @@ If a product name is mentioned, it's DIRECT - not ABSTRACT.
         """Build response for DIRECT queries."""
 
         product = llm_result.get("product", query)
+        raw_intent = llm_result.get("intent", "browse")
+        intent = normalize_intent(raw_intent) if settings.ff_intent_normalization else raw_intent
         with trace_stage("INTERPRET", "Category matching"):
             categories = await self._match_categories(product)
 
@@ -469,7 +499,7 @@ If a product name is mentioned, it's DIRECT - not ABSTRACT.
             "query_type": "direct",
             "searchable": True,
             "search_params": {
-                "intent": llm_result.get("intent", "browse"),
+                "intent": intent,
                 "product": product,
                 "brand": llm_result.get("brand"),
                 "persian_full_query": query,
@@ -558,6 +588,15 @@ If a product name is mentioned, it's DIRECT - not ABSTRACT.
         if not self._category_embeddings:
             log_interpret("No category embeddings loaded", {})
             return []
+        product = (product or "").strip()
+        if not product:
+            return []
+
+        cache_key = self._normalize_persian(product).lower()
+        cached = self._category_cache_get(cache_key)
+        if cached is not None:
+            log_interpret("Category match cache HIT", {"product": product, "count": len(cached)})
+            return cached
 
         try:
             # Generate embedding using local model (with E5 prefix)
@@ -592,8 +631,9 @@ If a product name is mentioned, it's DIRECT - not ABSTRACT.
                     "threshold": threshold,
                     "best_match": top_5[0] if top_5 else None
                 })
-            
-            return matched[:5]
+            matched = matched[:5]
+            self._category_cache_set(cache_key, matched)
+            return matched
 
         except Exception as e:
             log_interpret("Category matching error", {"error": str(e)})

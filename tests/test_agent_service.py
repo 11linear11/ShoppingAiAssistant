@@ -37,9 +37,7 @@ def test_extract_products_from_raw_array_and_detect_types():
     assert len(products) == 1
 
     query_type = service._detect_query_type(response, products)
-    # Current heuristic marks this as unknown because no direct indicators
-    # (like قیمت/تومان emoji markers) exist in the free-text prefix.
-    assert query_type == "unknown"
+    assert query_type == "direct"
 
 
 def test_chat_returns_cached_result_when_agent_cache_hits():
@@ -107,4 +105,4 @@ def test_chat_success_path_extracts_products_and_metadata():
     assert result["success"] is True
     assert len(result["products"]) == 1
     assert "```json" not in result["response"]
-    assert result["metadata"]["query_type"] in {"direct", "unknown"}
+    assert result["metadata"]["query_type"] == "direct"

@@ -287,6 +287,15 @@ class MCPClient:
             raise Exception(f"MCP request failed: HTTP {response.status_code} - {response.text}")
         
         raise Exception("MCP request failed after retries")
+
+    async def warmup_session(self) -> bool:
+        """Eagerly initialize MCP session so first user request avoids cold start."""
+        try:
+            await self._ensure_initialized()
+            return True
+        except Exception as e:
+            logger.warning(f"MCP warmup failed for {self.base_url}: {e}")
+            return False
     
     def _parse_json_response(self, text: str) -> dict[str, Any]:
         """Parse JSON response."""

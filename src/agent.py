@@ -21,6 +21,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings
 
 from src.mcp_client import InterpretMCPClient, SearchMCPClient
+from src.intent_utils import normalize_intent
 from src.pipeline_logger import (
     get_current_trace,
     log_agent,
@@ -62,6 +63,7 @@ class Settings(BaseSettings):
     redis_password: str = Field(default="", alias="REDIS_PASSWORD")
     redis_db: int = Field(default=0, alias="REDIS_DB")
     llm_cache_ttl: int = Field(default=86400, alias="LLM_CACHE_TTL")  # 24h
+    ff_intent_normalization: bool = Field(default=True, alias="FF_INTENT_NORMALIZATION")
 
     class Config:
         env_file = ".env"
@@ -127,10 +129,14 @@ def _make_search_cache_key(search_params: dict) -> str:
     Key is based on: product + brand + intent + price_range
     so that identical searches produce the same key.
     """
+    intent = str(search_params.get("intent", "browse") or "browse")
+    if settings.ff_intent_normalization:
+        intent = normalize_intent(intent)
+
     parts = [
         str(search_params.get("product", "") or ""),
         str(search_params.get("brand", "") or ""),
-        str(search_params.get("intent", "browse") or "browse"),
+        intent,
     ]
     # Include categories in cache key
     categories = search_params.get("categories_fa") or []
@@ -435,10 +441,12 @@ async def search_products(
         
         client = get_search_client()
         
+        normalized_intent = normalize_intent(intent) if settings.ff_intent_normalization else intent
+
         # Build search params - only include non-None values
         search_params = {
             "product": product,
-            "intent": intent,
+            "intent": normalized_intent,
             "persian_full_query": product,
         }
         
@@ -649,6 +657,31 @@ class ShoppingAgent:
         )
         
         log_agent("ShoppingAgent initialized", {"tools": [t.name for t in self.tools]})
+
+    async def warmup_mcp_sessions(self) -> dict[str, bool]:
+        """
+        Warm up MCP sessions so first user request avoids cold-start init cost.
+        """
+        start = perf_counter()
+        interpret_client = get_interpret_client()
+        search_client = get_search_client()
+
+        interpret_ok, search_ok = await asyncio.gather(
+            interpret_client.warmup_session(),
+            search_client.warmup_session(),
+        )
+        result = {
+            "interpret": bool(interpret_ok),
+            "search": bool(search_ok),
+        }
+        log_agent("MCP warmup complete", result)
+        log_latency_summary(
+            "AGENT",
+            "agent.mcp_warmup",
+            int((perf_counter() - start) * 1000),
+            meta=result,
+        )
+        return result
 
     async def chat(self, message: str, session_id: Optional[str] = None) -> tuple[str, str]:
         """

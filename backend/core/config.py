@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     # Timeouts
     agent_timeout: int = Field(default=120, alias="AGENT_TIMEOUT")
 
+    # Feature flags
+    ff_interpret_warmup: bool = Field(default=True, alias="FF_INTERPRET_WARMUP")
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

@@ -50,6 +50,12 @@ class AgentService:
             self._agent = ShoppingAgent()
             self._initialized = True
 
+            if settings.ff_interpret_warmup:
+                try:
+                    await self._agent.warmup_mcp_sessions()
+                except Exception as e:
+                    logger.warning(f"MCP warmup skipped due to error: {e}")
+
             # Initialize agent response cache
             if settings.agent_cache_enabled:
                 self._cache = AgentResponseCache(
@@ -458,6 +464,9 @@ class AgentService:
     
     def _detect_query_type(self, response: str, products: list) -> str:
         """Detect the type of query based on response."""
+        if products:
+            return "direct"
+
         # Check for greeting indicators
         greeting_indicators = ["سلام", "👋", "کمک", "خدمت", "😊", "😄"]
         if any(ind in response for ind in greeting_indicators) and not products:
