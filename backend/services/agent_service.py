@@ -336,12 +336,56 @@ class AgentService:
                     "top1_top2_margin": guard.get("top1_top2_margin"),
                 },
             )
+            router_route = "direct_fastpath"
+            final_llm_meta: dict[str, Any] = {}
             if settings.ff_conditional_final_llm and not bool(guard.get("accepted")):
-                logger.info(
-                    "Router direct fastpath rejected by guard; fallback to full agent pipeline",
-                    extra={"guard": guard},
-                )
-                return None
+                timeout_s = max(1, int(getattr(settings, "final_llm_timeout_seconds", 5)))
+                top_n = max(3, int(getattr(settings, "final_llm_top_n", 8)))
+                stage_start = perf_counter()
+                try:
+                    final_llm = await asyncio.wait_for(
+                        self.agent.final_rerank_direct(
+                            user_message=message,
+                            search_params=search_params,
+                            search_rows=rows,
+                            top_n=top_n,
+                        ),
+                        timeout=timeout_s,
+                    )
+                    timings["router_final_llm_ms"] = int((perf_counter() - stage_start) * 1000)
+                    log_latency_summary(
+                        "AGENT",
+                        "agent.router.final_llm",
+                        timings["router_final_llm_ms"],
+                        meta={"success": True, "timeout_s": timeout_s, "top_n": top_n},
+                    )
+                    rows = final_llm.get("rows") or rows
+                    final_llm_meta = final_llm.get("meta") or {}
+                    final_llm_meta["response"] = str(final_llm.get("response") or "").strip()
+                    router_route = "direct_final_llm"
+                except asyncio.TimeoutError:
+                    timings["router_final_llm_ms"] = int((perf_counter() - stage_start) * 1000)
+                    log_latency_summary(
+                        "AGENT",
+                        "agent.router.final_llm",
+                        timings["router_final_llm_ms"],
+                        meta={"success": False, "timeout": True, "timeout_s": timeout_s, "top_n": top_n},
+                    )
+                    logger.info(
+                        "Router final LLM timed out; fallback to full agent pipeline",
+                        extra={"guard": guard, "timeout_s": timeout_s},
+                    )
+                    return None
+                except Exception as e:
+                    timings["router_final_llm_ms"] = int((perf_counter() - stage_start) * 1000)
+                    log_latency_summary(
+                        "AGENT",
+                        "agent.router.final_llm",
+                        timings["router_final_llm_ms"],
+                        meta={"success": False, "timeout_s": timeout_s, "top_n": top_n},
+                    )
+                    logger.warning(f"Router final LLM failed, fallback to agent.chat: {e}")
+                    return None
 
             products: list[dict] = []
             for i, item in enumerate(rows[:5]):
@@ -363,7 +407,7 @@ class AgentService:
                 )
 
             if products:
-                response = "این محصولات رو پیدا کردم:"
+                response = str(final_llm_meta.get("response") or "").strip() or "این محصولات رو پیدا کردم:"
                 routed_query_type = "direct"
             else:
                 response = "متأسفانه محصول مورد نظر شما یافت نشد. میتونید با کلمات دیگه جستجو کنید."
@@ -379,8 +423,9 @@ class AgentService:
                     "total_results": len(products),
                     "from_agent_cache": False,
                     "from_router_fastpath": True,
-                    "router_route": "direct_fastpath",
+                    "router_route": router_route,
                     "router_guard": guard,
+                    "final_llm": final_llm_meta,
                     "latency_breakdown_ms": timings,
                 },
             }

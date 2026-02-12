@@ -71,6 +71,8 @@ class Settings(BaseSettings):
         default=0.58,
         alias="ROUTER_GUARD_MIN_CONFIDENCE",
     )
+    final_llm_timeout_seconds: int = Field(default=5, alias="FINAL_LLM_TIMEOUT_SECONDS")
+    final_llm_top_n: int = Field(default=8, alias="FINAL_LLM_TOP_N")
 
     class Config:
         env_file = ".env"

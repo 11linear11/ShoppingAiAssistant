@@ -10,16 +10,29 @@ def _run(coro):
 
 
 class FakeRouterAgent:
-    def __init__(self, interpret_result: dict, search_result: dict | None = None):
+    def __init__(
+        self,
+        interpret_result: dict,
+        search_result: dict | None = None,
+        final_result: dict | None = None,
+    ):
         self._interpret_result = interpret_result
         self._search_result = search_result or {}
+        self._final_result = final_result
         self.chat_called = False
+        self.final_called = False
 
     async def interpret_message(self, message: str, session_id: str, context=None):
         return self._interpret_result
 
     async def search_from_params(self, search_params: dict, session_id: str, use_cache=None):
         return self._search_result
+
+    async def final_rerank_direct(self, user_message: str, search_params: dict, search_rows: list[dict], top_n: int = 8):
+        self.final_called = True
+        if self._final_result is None:
+            raise RuntimeError("final llm unavailable")
+        return self._final_result
 
     async def chat(self, message: str, session_id: str):
         self.chat_called = True
@@ -198,4 +211,79 @@ def test_router_direct_fastpath_can_skip_fallback_when_flag_disabled(monkeypatch
     result = _run(service.chat("گوشی", session_id="sess-no-fallback"))
     assert result["success"] is True
     assert result["metadata"]["query_type"] in {"direct", "no_results"}
+    assert service._agent.chat_called is False
+
+
+def test_router_direct_fastpath_low_confidence_uses_final_llm(monkeypatch):
+    service = AgentService()
+    service._initialized = True
+    service._agent = FakeRouterAgent(
+        interpret_result={
+            "query_type": "direct",
+            "searchable": True,
+            "search_params": {
+                "product": "گوشی",
+                "intent": "browse",
+                "persian_full_query": "گوشی",
+            },
+        },
+        search_result={
+            "results": [
+                {
+                    "id": "p1",
+                    "product_name": "گوشی موبایل الف",
+                    "brand_name": "A",
+                    "category_name": "موبایل",
+                    "price": 10000000,
+                    "relevancy_score": 0.62,
+                },
+                {
+                    "id": "p2",
+                    "product_name": "نگهدارنده گوشی",
+                    "brand_name": "B",
+                    "category_name": "اکسسوری",
+                    "price": 300000,
+                    "relevancy_score": 0.61,
+                },
+            ]
+        },
+        final_result={
+            "response": "چند گزینه مرتبط پیدا کردم:",
+            "rows": [
+                {
+                    "id": "p1",
+                    "product_name": "گوشی موبایل الف",
+                    "brand_name": "A",
+                    "category_name": "موبایل",
+                    "price": 10000000,
+                    "discount_price": 9500000,
+                    "has_discount": True,
+                    "discount_percentage": 5,
+                    "product_url": "https://example.com/p1",
+                }
+            ],
+            "meta": {"mode": "llm_selected", "selected_count": 1},
+        },
+    )
+    service._cache = AsyncMock()
+    service._cache.available = True
+    service._cache.get = AsyncMock(return_value=None)
+    service._cache.set = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(agent_service_module.settings, "ff_router_enabled", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "ff_abstract_fastpath", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "ff_direct_fastpath", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "ff_conditional_final_llm", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "router_guard_t1", 0.55, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "router_guard_t2", 0.08, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "router_guard_min_confidence", 0.58, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "final_llm_timeout_seconds", 5, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "final_llm_top_n", 8, raising=False)
+
+    result = _run(service.chat("گوشی", session_id="sess-final-llm"))
+    assert result["success"] is True
+    assert result["metadata"]["router_route"] == "direct_final_llm"
+    assert result["response"] == "چند گزینه مرتبط پیدا کردم:"
+    assert len(result["products"]) == 1
+    assert service._agent.final_called is True
     assert service._agent.chat_called is False

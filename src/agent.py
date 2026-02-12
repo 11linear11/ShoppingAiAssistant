@@ -7,12 +7,13 @@ The LLM decides which tools to use based on user queries.
 
 import asyncio
 import json
+import re
 import uuid
 from time import perf_counter
 from contextvars import ContextVar
 from typing import Optional
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
@@ -714,6 +715,146 @@ class ShoppingAgent:
             session_id=session_id,
             use_cache=not settings.debug_mode if use_cache is None else bool(use_cache),
         )
+
+    @staticmethod
+    def _extract_json_object(text: str) -> Optional[dict]:
+        """Extract first valid JSON object from model output."""
+        if not text:
+            return None
+        candidate_blocks = []
+        stripped = text.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            candidate_blocks.append(stripped)
+
+        fenced = re.findall(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE)
+        candidate_blocks.extend(fenced)
+
+        brace_match = re.search(r"\{[\s\S]*\}", text)
+        if brace_match:
+            candidate_blocks.append(brace_match.group(0))
+
+        for candidate in candidate_blocks:
+            try:
+                parsed = json.loads(candidate.strip())
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                continue
+        return None
+
+    async def final_rerank_direct(
+        self,
+        user_message: str,
+        search_params: dict,
+        search_rows: list[dict],
+        top_n: int = 8,
+    ) -> dict:
+        """
+        Run a lightweight final LLM pass on top-N search rows (no ReAct tools).
+        Returns structured rows + response for low-confidence direct queries.
+        """
+        start = perf_counter()
+        timings: dict[str, int] = {}
+
+        top_n = max(3, min(int(top_n or 8), 15))
+        candidates = []
+        for idx, item in enumerate((search_rows or [])[:top_n]):
+            candidates.append(
+                {
+                    "id": str(item.get("id") or item.get("product_id") or idx + 1),
+                    "product_name": str(item.get("product_name") or item.get("name") or "").strip(),
+                    "brand_name": str(item.get("brand_name") or item.get("brand") or "").strip(),
+                    "category_name": str(item.get("category_name") or "").strip(),
+                    "price": item.get("price"),
+                    "discount_price": item.get("discount_price"),
+                    "discount_percentage": item.get("discount_percentage", 0),
+                    "relevancy_score": item.get("relevancy_score"),
+                    "product_url": str(item.get("product_url") or item.get("url") or "").strip(),
+                }
+            )
+
+        if not candidates:
+            return {
+                "response": "متأسفانه محصول مورد نظر شما یافت نشد. میتونید با کلمات دیگه جستجو کنید.",
+                "rows": [],
+                "meta": {"mode": "empty_candidates"},
+            }
+
+        system_prompt = (
+            "You are a Persian e-commerce result selector. "
+            "You receive user query and top search candidates. "
+            "Return valid JSON only with this schema: "
+            '{"response":"short Persian response","selected_ids":["id1","id2"]}. '
+            "Rules: select at most 5 products, keep high relevance, and avoid unrelated items. "
+            "If query is broad (e.g. گوشی), compatible accessories may stay if relevant. "
+            "Do not invent product ids."
+        )
+        payload = {
+            "user_message": user_message,
+            "search_params": {
+                "product": search_params.get("product"),
+                "intent": search_params.get("intent"),
+                "categories_fa": search_params.get("categories_fa") or [],
+            },
+            "candidates": candidates,
+        }
+
+        llm_start = perf_counter()
+        model_response = await self.llm.ainvoke(
+            [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=json.dumps(payload, ensure_ascii=False)),
+            ]
+        )
+        timings["llm_invoke_ms"] = int((perf_counter() - llm_start) * 1000)
+
+        parse_start = perf_counter()
+        raw_text = model_response.content if isinstance(model_response.content, str) else str(model_response.content)
+        parsed = self._extract_json_object(raw_text) or {}
+        selected_ids_raw = parsed.get("selected_ids") if isinstance(parsed, dict) else []
+        selected_ids = [
+            str(pid).strip() for pid in (selected_ids_raw or []) if str(pid).strip()
+        ]
+        response_text = (
+            str(parsed.get("response") or "").strip()
+            if isinstance(parsed, dict)
+            else ""
+        )
+        timings["parse_ms"] = int((perf_counter() - parse_start) * 1000)
+
+        row_by_id = {str(row.get("id")): row for row in candidates}
+        selected_rows: list[dict] = []
+        for pid in selected_ids:
+            row = row_by_id.get(pid)
+            if row and row not in selected_rows:
+                selected_rows.append(row)
+
+        if not selected_rows:
+            selected_rows = candidates[:5]
+
+        if not response_text:
+            response_text = "این محصولات رو پیدا کردم:"
+
+        result = {
+            "response": response_text,
+            "rows": selected_rows[:5],
+            "meta": {
+                "mode": "llm_selected",
+                "input_candidates": len(candidates),
+                "selected_count": len(selected_rows[:5]),
+            },
+        }
+        log_latency_summary(
+            "AGENT",
+            "agent.final_llm_fallback",
+            int((perf_counter() - start) * 1000),
+            breakdown_ms=timings,
+            meta={
+                "candidates": len(candidates),
+                "selected": len(result["rows"]),
+            },
+        )
+        return result
 
     async def chat(self, message: str, session_id: Optional[str] = None) -> tuple[str, str]:
         """
