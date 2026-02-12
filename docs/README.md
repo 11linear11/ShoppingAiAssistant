@@ -11,6 +11,7 @@
 - پایپلاین‌ها: `docs/fa/PIPELINES.md`
 - API و قراردادهای MCP: `docs/fa/API.md`
 - عملیات و پیکربندی: `docs/fa/OPERATIONS.md`
+- برنامه فازبندی مهاجرت: `docs/fa/ROLLOUT_PLAN.md`
 
 ## Scope
 These documents are aligned with current code paths:
