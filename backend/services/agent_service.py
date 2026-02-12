@@ -12,7 +12,7 @@ import re
 import uuid
 from time import perf_counter
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 import sys
 from pathlib import Path
@@ -75,6 +75,171 @@ class AgentService:
         if not self._initialized or self._agent is None:
             raise RuntimeError("Agent not initialized. Call initialize() first.")
         return self._agent
+
+    @staticmethod
+    def _normalize_text(value: str) -> str:
+        """Normalize Persian text for stable matching."""
+        if not value:
+            return ""
+        normalized = value.strip().lower()
+        normalized = normalized.replace("ي", "ی").replace("ك", "ک").replace("‌", " ")
+        normalized = re.sub(r"\s+", " ", normalized)
+        return normalized
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return default
+
+    def _tokenize_text(self, value: str) -> list[str]:
+        """Tokenize text with light Persian stopword filtering."""
+        stopwords = {
+            "یه", "یک", "من", "تو", "با", "از", "به", "برای", "در", "و", "یا",
+            "رو", "را", "که", "این", "اون", "میخوام", "می‌خوام", "میخام", "میخواهم",
+            "می", "خوام", "دارم", "م", "هستم",
+        }
+        normalized = self._normalize_text(value)
+        normalized = re.sub(r"[^\w\s]", " ", normalized)
+        tokens: list[str] = []
+        for token in normalized.split():
+            t = token.strip()
+            if len(t) < 2 or t in stopwords:
+                continue
+            tokens.append(t)
+        return tokens
+
+    def _token_overlap_score(self, query: str, candidate: str) -> float:
+        """Soft overlap score to avoid strict keyword-only filtering."""
+        query_tokens = self._tokenize_text(query)
+        if not query_tokens:
+            return 0.5
+
+        candidate_norm = self._normalize_text(candidate)
+        candidate_tokens = set(self._tokenize_text(candidate))
+
+        hits = 0
+        for token in query_tokens:
+            if token in candidate_tokens:
+                hits += 1
+                continue
+            if len(token) >= 3 and token in candidate_norm:
+                hits += 1
+
+        return min(1.0, hits / max(1, len(query_tokens)))
+
+    def _category_alignment_score(self, expected_categories: list[str], rows: list[dict[str, Any]]) -> float:
+        """Category alignment as a soft signal (not a hard filter)."""
+        normalized_expected = {
+            self._normalize_text(str(c)) for c in (expected_categories or []) if str(c).strip()
+        }
+        if not normalized_expected:
+            return 1.0
+
+        compared = 0
+        matched = 0
+        for row in rows[:3]:
+            category_name = self._normalize_text(str(row.get("category_name") or ""))
+            if not category_name:
+                continue
+            compared += 1
+            if any(exp in category_name or category_name in exp for exp in normalized_expected):
+                matched += 1
+
+        if compared == 0:
+            return 0.5
+        return matched / compared
+
+    def _evaluate_direct_fastpath(
+        self,
+        search_params: dict[str, Any],
+        rows: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """
+        Decide whether direct fastpath results are reliable enough to skip final LLM.
+
+        Uses a hybrid confidence score: rerank relevancy + margin + token overlap + category alignment.
+        """
+        if not rows:
+            return {
+                "accepted": True,
+                "reason": "no_results",
+                "confidence": 1.0,
+                "top1_relevancy": 0.0,
+                "top1_top2_margin": 0.0,
+                "avg_top3_relevancy": 0.0,
+                "query_overlap": 0.0,
+                "category_alignment": 1.0,
+            }
+
+        query = str(search_params.get("product") or search_params.get("persian_full_query") or "")
+        intent = self._normalize_text(str(search_params.get("intent") or "browse"))
+        top_rows = rows[:3]
+
+        relevancies: list[float] = []
+        for row in top_rows:
+            rel = row.get("relevancy_score")
+            if rel is None:
+                rel = self._token_overlap_score(query, str(row.get("product_name") or row.get("name") or ""))
+            relevancies.append(max(0.0, min(1.0, self._safe_float(rel, default=0.0))))
+
+        top1 = relevancies[0] if relevancies else 0.0
+        top2 = relevancies[1] if len(relevancies) > 1 else 0.0
+        margin = max(0.0, top1 - top2)
+        avg_top3 = sum(relevancies) / len(relevancies) if relevancies else 0.0
+
+        top_name = str(top_rows[0].get("product_name") or top_rows[0].get("name") or "")
+        query_overlap = self._token_overlap_score(query, top_name)
+        category_alignment = self._category_alignment_score(
+            search_params.get("categories_fa") or [],
+            top_rows,
+        )
+
+        margin_norm = min(1.0, margin / 0.25)
+        confidence = (
+            0.40 * top1
+            + 0.20 * avg_top3
+            + 0.15 * margin_norm
+            + 0.15 * query_overlap
+            + 0.10 * category_alignment
+        )
+
+        t1 = self._safe_float(getattr(settings, "router_guard_t1", 0.55), default=0.55)
+        t2 = self._safe_float(getattr(settings, "router_guard_t2", 0.08), default=0.08)
+        min_conf = self._safe_float(
+            getattr(settings, "router_guard_min_confidence", 0.58),
+            default=0.58,
+        )
+
+        required_margin = t2
+        if intent in {"find_cheapest", "find_best_value", "find_high_quality"}:
+            required_margin = t2 * 0.5
+
+        has_margin = len(relevancies) < 2 or margin >= required_margin
+        accepted = bool(top1 >= t1 and has_margin and confidence >= min_conf)
+
+        reason = "accepted" if accepted else "low_confidence"
+        if not accepted and top1 < t1:
+            reason = "low_top1_relevancy"
+        elif not accepted and not has_margin:
+            reason = "low_top1_top2_margin"
+
+        return {
+            "accepted": accepted,
+            "reason": reason,
+            "confidence": round(confidence, 4),
+            "top1_relevancy": round(top1, 4),
+            "top1_top2_margin": round(margin, 4),
+            "avg_top3_relevancy": round(avg_top3, 4),
+            "query_overlap": round(query_overlap, 4),
+            "category_alignment": round(category_alignment, 4),
+            "thresholds": {
+                "t1": round(t1, 4),
+                "t2": round(required_margin, 4),
+                "min_confidence": round(min_conf, 4),
+            },
+        }
 
     async def _try_router_fastpath(
         self,
@@ -152,6 +317,28 @@ class AgentService:
             timings["router_search_ms"] = int((perf_counter() - stage_start) * 1000)
 
             rows = search_result.get("results") or []
+            stage_start = perf_counter()
+            guard = self._evaluate_direct_fastpath(search_params, rows)
+            timings["router_guard_ms"] = int((perf_counter() - stage_start) * 1000)
+            log_latency_summary(
+                "AGENT",
+                "agent.router.direct_guard",
+                timings["router_guard_ms"],
+                meta={
+                    "accepted": guard.get("accepted"),
+                    "reason": guard.get("reason"),
+                    "confidence": guard.get("confidence"),
+                    "top1_relevancy": guard.get("top1_relevancy"),
+                    "top1_top2_margin": guard.get("top1_top2_margin"),
+                },
+            )
+            if settings.ff_conditional_final_llm and not bool(guard.get("accepted")):
+                logger.info(
+                    "Router direct fastpath rejected by guard; fallback to full agent pipeline",
+                    extra={"guard": guard},
+                )
+                return None
+
             products: list[dict] = []
             for i, item in enumerate(rows[:5]):
                 products.append(
@@ -189,6 +376,7 @@ class AgentService:
                     "from_agent_cache": False,
                     "from_router_fastpath": True,
                     "router_route": "direct_fastpath",
+                    "router_guard": guard,
                     "latency_breakdown_ms": timings,
                 },
             }

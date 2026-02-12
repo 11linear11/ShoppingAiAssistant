@@ -62,6 +62,15 @@ class Settings(BaseSettings):
     ff_router_enabled: bool = Field(default=True, alias="FF_ROUTER_ENABLED")
     ff_abstract_fastpath: bool = Field(default=True, alias="FF_ABSTRACT_FASTPATH")
     ff_direct_fastpath: bool = Field(default=False, alias="FF_DIRECT_FASTPATH")
+    ff_conditional_final_llm: bool = Field(default=True, alias="FF_CONDITIONAL_FINAL_LLM")
+
+    # Router guard thresholds (for direct fastpath confidence)
+    router_guard_t1: float = Field(default=0.55, alias="ROUTER_GUARD_T1")
+    router_guard_t2: float = Field(default=0.08, alias="ROUTER_GUARD_T2")
+    router_guard_min_confidence: float = Field(
+        default=0.58,
+        alias="ROUTER_GUARD_MIN_CONFIDENCE",
+    )
 
     class Config:
         env_file = ".env"
