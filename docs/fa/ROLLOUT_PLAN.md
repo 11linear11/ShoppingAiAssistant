@@ -118,3 +118,19 @@
 - لیست تغییرات و rollback plan
 - گزارش قبل/بعد latency و کیفیت
 - وضعیت feature-flagها
+
+## ۹) وضعیت فعلی اجرا (Feature Branch)
+- فاز ۱ (Quick Wins): انجام شده
+- فاز ۲ (Router تفکیک مسیر): انجام شده
+- فاز ۳ (Relevance Guard هیبرید): انجام شده در مسیر direct fastpath
+- تنظیمات فعال روی برنچ تست:
+  - `FF_ROUTER_ENABLED=true`
+  - `FF_ABSTRACT_FASTPATH=true`
+  - `FF_DIRECT_FASTPATH=true`
+  - `FF_CONDITIONAL_FINAL_LLM=true`
+  - `ROUTER_GUARD_T1=0.55`
+  - `ROUTER_GUARD_T2=0.08`
+  - `ROUTER_GUARD_MIN_CONFIDENCE=0.58`
+- نکته عملیاتی:
+  - directهای با confidence بالا بدون LLM نهایی پاسخ می‌گیرند.
+  - directهای مبهم/low-confidence به مسیر LLM فعلی fallback می‌شوند.
