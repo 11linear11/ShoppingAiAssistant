@@ -54,6 +54,8 @@ class Settings(BaseSettings):
 
     interpret_url: str = Field(default="http://localhost:5004", alias="MCP_INTERPRET_URL")
     search_url: str = Field(default="http://localhost:5002", alias="MCP_SEARCH_URL")
+    interpret_mcp_timeout: float = Field(default=90.0, alias="INTERPRET_MCP_TIMEOUT")
+    search_mcp_timeout: float = Field(default=60.0, alias="SEARCH_MCP_TIMEOUT")
 
     debug_mode: bool = Field(default=False, alias="DEBUG_MODE")
 
@@ -303,14 +305,18 @@ _search_client: Optional[SearchMCPClient] = None
 def get_interpret_client() -> InterpretMCPClient:
     global _interpret_client
     if _interpret_client is None:
-        _interpret_client = InterpretMCPClient(settings.interpret_url, timeout=90.0)
+        _interpret_client = InterpretMCPClient(
+            settings.interpret_url, timeout=settings.interpret_mcp_timeout
+        )
     return _interpret_client
 
 
 def get_search_client() -> SearchMCPClient:
     global _search_client
     if _search_client is None:
-        _search_client = SearchMCPClient(settings.search_url, timeout=60.0)
+        _search_client = SearchMCPClient(
+            settings.search_url, timeout=settings.search_mcp_timeout
+        )
     return _search_client
 
 
