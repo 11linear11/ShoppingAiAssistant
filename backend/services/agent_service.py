@@ -7,6 +7,7 @@ Includes agent response caching (Level 2 cache) to skip LLM on repeat queries.
 """
 
 import asyncio
+import hashlib
 import json
 import re
 import uuid
@@ -245,6 +246,34 @@ class AgentService:
             },
         }
 
+    @staticmethod
+    def _stable_rollout_bucket(seed: str) -> int:
+        """Deterministic 0..99 bucket for rollout decisions."""
+        digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+        return int(digest[:8], 16) % 100
+
+    def _is_in_rollout(self, feature: str, session_id: str) -> tuple[bool, dict[str, Any]]:
+        """Decide if feature is enabled for this session based on rollout percent."""
+        feature_key = (feature or "").strip().lower()
+        percent_map = {
+            "direct_fastpath": getattr(settings, "direct_fastpath_rollout_percent", 100),
+            "final_llm": getattr(settings, "final_llm_rollout_percent", 100),
+        }
+        raw_percent = percent_map.get(feature_key, 100)
+        try:
+            percent = int(raw_percent)
+        except Exception:
+            percent = 100
+        percent = max(0, min(100, percent))
+
+        bucket = self._stable_rollout_bucket(f"{feature_key}:{session_id}")
+        enabled = bucket < percent
+        return enabled, {
+            "feature": feature_key,
+            "rollout_percent": percent,
+            "bucket": bucket,
+        }
+
     async def _try_router_fastpath(
         self,
         message: str,
@@ -312,6 +341,20 @@ class AgentService:
             and searchable
             and search_params
         ):
+            in_rollout, rollout_meta = self._is_in_rollout("direct_fastpath", session_id)
+            log_latency_summary(
+                "AGENT",
+                "agent.router.rollout",
+                0,
+                meta={**rollout_meta, "enabled": in_rollout},
+            )
+            if not in_rollout:
+                logger.info(
+                    "Direct fastpath skipped by rollout percentage; fallback to full agent pipeline",
+                    extra=rollout_meta,
+                )
+                return None
+
             stage_start = perf_counter()
             try:
                 search_result = await self.agent.search_from_params(search_params, session_id)
@@ -339,6 +382,20 @@ class AgentService:
             router_route = "direct_fastpath"
             final_llm_meta: dict[str, Any] = {}
             if settings.ff_conditional_final_llm and not bool(guard.get("accepted")):
+                in_rollout, final_rollout_meta = self._is_in_rollout("final_llm", session_id)
+                log_latency_summary(
+                    "AGENT",
+                    "agent.router.rollout",
+                    0,
+                    meta={**final_rollout_meta, "enabled": in_rollout},
+                )
+                if not in_rollout:
+                    logger.info(
+                        "Final LLM fallback skipped by rollout percentage; fallback to full agent pipeline",
+                        extra=final_rollout_meta,
+                    )
+                    return None
+
                 timeout_s = max(1, int(getattr(settings, "final_llm_timeout_seconds", 5)))
                 top_n = max(3, int(getattr(settings, "final_llm_top_n", 8)))
                 stage_start = perf_counter()

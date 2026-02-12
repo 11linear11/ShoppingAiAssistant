@@ -63,6 +63,14 @@ class Settings(BaseSettings):
     ff_abstract_fastpath: bool = Field(default=True, alias="FF_ABSTRACT_FASTPATH")
     ff_direct_fastpath: bool = Field(default=False, alias="FF_DIRECT_FASTPATH")
     ff_conditional_final_llm: bool = Field(default=True, alias="FF_CONDITIONAL_FINAL_LLM")
+    direct_fastpath_rollout_percent: int = Field(
+        default=100,
+        alias="DIRECT_FASTPATH_ROLLOUT_PERCENT",
+    )
+    final_llm_rollout_percent: int = Field(
+        default=100,
+        alias="FINAL_LLM_ROLLOUT_PERCENT",
+    )
 
     # Router guard thresholds (for direct fastpath confidence)
     router_guard_t1: float = Field(default=0.55, alias="ROUTER_GUARD_T1")

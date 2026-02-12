@@ -106,6 +106,8 @@ def test_router_direct_fastpath_uses_search_and_sets_cache(monkeypatch):
     monkeypatch.setattr(agent_service_module.settings, "ff_abstract_fastpath", True, raising=False)
     monkeypatch.setattr(agent_service_module.settings, "ff_direct_fastpath", True, raising=False)
     monkeypatch.setattr(agent_service_module.settings, "ff_conditional_final_llm", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "direct_fastpath_rollout_percent", 100, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "final_llm_rollout_percent", 100, raising=False)
 
     result = _run(service.chat("شلوار مردانه", session_id="sess-d"))
     assert result["success"] is True
@@ -158,6 +160,8 @@ def test_router_direct_fastpath_low_confidence_falls_back_to_agent(monkeypatch):
     monkeypatch.setattr(agent_service_module.settings, "ff_abstract_fastpath", True, raising=False)
     monkeypatch.setattr(agent_service_module.settings, "ff_direct_fastpath", True, raising=False)
     monkeypatch.setattr(agent_service_module.settings, "ff_conditional_final_llm", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "direct_fastpath_rollout_percent", 100, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "final_llm_rollout_percent", 100, raising=False)
     monkeypatch.setattr(agent_service_module.settings, "router_guard_t1", 0.55, raising=False)
     monkeypatch.setattr(agent_service_module.settings, "router_guard_t2", 0.08, raising=False)
     monkeypatch.setattr(agent_service_module.settings, "router_guard_min_confidence", 0.58, raising=False)
@@ -204,6 +208,8 @@ def test_router_direct_fastpath_can_skip_fallback_when_flag_disabled(monkeypatch
     monkeypatch.setattr(agent_service_module.settings, "ff_abstract_fastpath", True, raising=False)
     monkeypatch.setattr(agent_service_module.settings, "ff_direct_fastpath", True, raising=False)
     monkeypatch.setattr(agent_service_module.settings, "ff_conditional_final_llm", False, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "direct_fastpath_rollout_percent", 100, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "final_llm_rollout_percent", 100, raising=False)
     monkeypatch.setattr(agent_service_module.settings, "router_guard_t1", 0.55, raising=False)
     monkeypatch.setattr(agent_service_module.settings, "router_guard_t2", 0.08, raising=False)
     monkeypatch.setattr(agent_service_module.settings, "router_guard_min_confidence", 0.58, raising=False)
@@ -274,6 +280,8 @@ def test_router_direct_fastpath_low_confidence_uses_final_llm(monkeypatch):
     monkeypatch.setattr(agent_service_module.settings, "ff_abstract_fastpath", True, raising=False)
     monkeypatch.setattr(agent_service_module.settings, "ff_direct_fastpath", True, raising=False)
     monkeypatch.setattr(agent_service_module.settings, "ff_conditional_final_llm", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "direct_fastpath_rollout_percent", 100, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "final_llm_rollout_percent", 100, raising=False)
     monkeypatch.setattr(agent_service_module.settings, "router_guard_t1", 0.55, raising=False)
     monkeypatch.setattr(agent_service_module.settings, "router_guard_t2", 0.08, raising=False)
     monkeypatch.setattr(agent_service_module.settings, "router_guard_min_confidence", 0.58, raising=False)
@@ -287,3 +295,89 @@ def test_router_direct_fastpath_low_confidence_uses_final_llm(monkeypatch):
     assert len(result["products"]) == 1
     assert service._agent.final_called is True
     assert service._agent.chat_called is False
+
+
+def test_router_direct_fastpath_rollout_zero_forces_fallback(monkeypatch):
+    service = AgentService()
+    service._initialized = True
+    service._agent = FakeRouterAgent(
+        interpret_result={
+            "query_type": "direct",
+            "searchable": True,
+            "search_params": {
+                "product": "شلوار",
+                "intent": "browse",
+                "persian_full_query": "شلوار",
+            },
+        },
+        search_result={
+            "results": [
+                {"id": "p1", "product_name": "شلوار مردانه", "price": 1000000, "relevancy_score": 0.9}
+            ]
+        },
+        final_result={"response": "ok", "rows": [], "meta": {}},
+    )
+    service._cache = AsyncMock()
+    service._cache.available = True
+    service._cache.get = AsyncMock(return_value=None)
+    service._cache.set = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(agent_service_module.settings, "ff_router_enabled", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "ff_abstract_fastpath", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "ff_direct_fastpath", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "ff_conditional_final_llm", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "direct_fastpath_rollout_percent", 0, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "final_llm_rollout_percent", 100, raising=False)
+
+    result = _run(service.chat("شلوار", session_id="sess-rollout-direct"))
+    assert result["success"] is True
+    assert result["response"] == "fallback"
+    assert service._agent.chat_called is True
+    assert service._agent.final_called is False
+
+
+def test_router_final_llm_rollout_zero_forces_legacy_fallback(monkeypatch):
+    service = AgentService()
+    service._initialized = True
+    service._agent = FakeRouterAgent(
+        interpret_result={
+            "query_type": "direct",
+            "searchable": True,
+            "search_params": {
+                "product": "گوشی",
+                "intent": "browse",
+                "persian_full_query": "گوشی",
+            },
+        },
+        search_result={
+            "results": [
+                {"id": "p1", "product_name": "گوشی موبایل", "price": 9000000, "relevancy_score": 0.62},
+                {"id": "p2", "product_name": "کیف لپ تاپ", "price": 900000, "relevancy_score": 0.61},
+            ]
+        },
+        final_result={
+            "response": "باید استفاده نشود",
+            "rows": [{"id": "p1", "product_name": "گوشی موبایل", "price": 9000000}],
+            "meta": {},
+        },
+    )
+    service._cache = AsyncMock()
+    service._cache.available = True
+    service._cache.get = AsyncMock(return_value=None)
+    service._cache.set = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(agent_service_module.settings, "ff_router_enabled", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "ff_abstract_fastpath", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "ff_direct_fastpath", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "ff_conditional_final_llm", True, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "direct_fastpath_rollout_percent", 100, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "final_llm_rollout_percent", 0, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "router_guard_t1", 0.55, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "router_guard_t2", 0.08, raising=False)
+    monkeypatch.setattr(agent_service_module.settings, "router_guard_min_confidence", 0.58, raising=False)
+
+    result = _run(service.chat("گوشی", session_id="sess-rollout-final"))
+    assert result["success"] is True
+    assert result["response"] == "fallback"
+    assert service._agent.chat_called is True
+    assert service._agent.final_called is False
