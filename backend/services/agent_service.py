@@ -76,6 +76,134 @@ class AgentService:
             raise RuntimeError("Agent not initialized. Call initialize() first.")
         return self._agent
 
+    async def _try_router_fastpath(
+        self,
+        message: str,
+        session_id: str,
+        timings: dict[str, int],
+    ) -> Optional[dict]:
+        """Try routing request to fast deterministic paths. Return None to fallback."""
+        if not settings.ff_router_enabled:
+            return None
+
+        stage_start = perf_counter()
+        try:
+            interpret = await self.agent.interpret_message(message, session_id)
+        except Exception as e:
+            logger.warning(f"Router interpret failed, fallback to agent.chat: {e}")
+            return None
+        if not isinstance(interpret, dict):
+            return None
+        timings["router_interpret_ms"] = int((perf_counter() - stage_start) * 1000)
+
+        query_type = str(interpret.get("query_type") or "unknown")
+        searchable = bool(interpret.get("searchable"))
+        search_params = interpret.get("search_params") or {}
+        clarification = interpret.get("clarification") or {}
+
+        # Abstract/unclear fastpath: respond from interpret clarification (no full agent loop).
+        if (
+            settings.ff_abstract_fastpath
+            and query_type in {"abstract", "unclear"}
+            and not searchable
+        ):
+            question = str(clarification.get("question") or "لطفاً دقیق‌تر بگید دنبال چه محصولی هستید؟").strip()
+            suggestions = clarification.get("suggestions") or []
+            suggestion_names = [
+                str(s.get("product") or "").strip()
+                for s in suggestions
+                if isinstance(s, dict) and str(s.get("product") or "").strip()
+            ][:5]
+
+            response = question
+            if suggestion_names:
+                response = f"{question}\nپیشنهادها: " + " | ".join(
+                    f"{i + 1}) {name}" for i, name in enumerate(suggestion_names)
+                )
+
+            return {
+                "success": True,
+                "response": response,
+                "session_id": session_id,
+                "products": [],
+                "metadata": {
+                    "query_type": query_type,
+                    "total_results": 0,
+                    "from_agent_cache": False,
+                    "from_router_fastpath": True,
+                    "router_route": "abstract_fastpath",
+                    "latency_breakdown_ms": timings,
+                },
+            }
+
+        # Direct fastpath: interpret -> search -> deterministic response.
+        if (
+            settings.ff_direct_fastpath
+            and query_type == "direct"
+            and searchable
+            and search_params
+        ):
+            stage_start = perf_counter()
+            try:
+                search_result = await self.agent.search_from_params(search_params, session_id)
+            except Exception as e:
+                logger.warning(f"Router direct search failed, fallback to agent.chat: {e}")
+                return None
+            timings["router_search_ms"] = int((perf_counter() - stage_start) * 1000)
+
+            rows = search_result.get("results") or []
+            products: list[dict] = []
+            for i, item in enumerate(rows[:5]):
+                products.append(
+                    {
+                        "id": str(item.get("id") or item.get("product_id") or i + 1),
+                        "name": str(item.get("product_name") or item.get("name") or "").strip(),
+                        "brand": str(item.get("brand_name") or item.get("brand") or "").strip(),
+                        "price": float(item.get("price") or 0),
+                        "discount_price": (
+                            float(item.get("discount_price"))
+                            if item.get("discount_price") is not None
+                            else None
+                        ),
+                        "has_discount": bool(item.get("has_discount", False)),
+                        "discount_percentage": float(item.get("discount_percentage") or 0),
+                        "product_url": str(item.get("product_url") or item.get("url") or "").strip(),
+                    }
+                )
+
+            if products:
+                response = "این محصولات رو پیدا کردم:"
+                routed_query_type = "direct"
+            else:
+                response = "متأسفانه محصول مورد نظر شما یافت نشد. میتونید با کلمات دیگه جستجو کنید."
+                routed_query_type = "no_results"
+
+            result = {
+                "success": True,
+                "response": response,
+                "session_id": session_id,
+                "products": products,
+                "metadata": {
+                    "query_type": routed_query_type,
+                    "total_results": len(products),
+                    "from_agent_cache": False,
+                    "from_router_fastpath": True,
+                    "router_route": "direct_fastpath",
+                    "latency_breakdown_ms": timings,
+                },
+            }
+
+            # Reuse level-2 agent cache for direct fastpath responses.
+            if self._cache and self._cache.available and products:
+                stage_start = perf_counter()
+                await self._cache.set(message, result)
+                timings["agent_cache_set_ms"] = int((perf_counter() - stage_start) * 1000)
+                result["metadata"]["latency_breakdown_ms"] = timings
+
+            return result
+
+        return None
+
     async def chat(
         self,
         message: str,
@@ -133,6 +261,28 @@ class AgentService:
                 return cached
         else:
             timings["agent_cache_lookup_ms"] = 0
+
+        # ── Router fastpath (after cache miss) ─────────────────────
+        stage_start = perf_counter()
+        routed = await self._try_router_fastpath(message, session_id, timings)
+        timings["router_total_ms"] = int((perf_counter() - stage_start) * 1000)
+        if routed is not None:
+            took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            routed["metadata"]["took_ms"] = took_ms
+            routed["metadata"]["latency_breakdown_ms"] = timings
+            log_latency_summary(
+                "AGENT",
+                "agent_service.chat",
+                int((perf_counter() - request_start) * 1000),
+                breakdown_ms=timings,
+                meta={
+                    "cache": "router_fastpath",
+                    "query_type": routed["metadata"].get("query_type"),
+                    "success": routed.get("success", True),
+                    "products": len(routed.get("products") or []),
+                },
+            )
+            return routed
         
         # ── Cache miss → full pipeline ─────────────────────────────
         try:

@@ -683,6 +683,38 @@ class ShoppingAgent:
         )
         return result
 
+    async def interpret_message(
+        self,
+        message: str,
+        session_id: str,
+        context: Optional[dict] = None,
+    ) -> dict:
+        """Run only interpret tool path (without full ReAct loop)."""
+        client = get_interpret_client()
+        return await client.interpret_query(
+            query=message,
+            session_id=session_id,
+            context=context or {},
+        )
+
+    async def search_from_params(
+        self,
+        search_params: dict,
+        session_id: str,
+        use_cache: Optional[bool] = None,
+    ) -> dict:
+        """Run only search tool path from structured params."""
+        client = get_search_client()
+        search_payload = dict(search_params or {})
+        intent = search_payload.get("intent")
+        if settings.ff_intent_normalization:
+            search_payload["intent"] = normalize_intent(intent)
+        return await client.search_products(
+            search_params=search_payload,
+            session_id=session_id,
+            use_cache=not settings.debug_mode if use_cache is None else bool(use_cache),
+        )
+
     async def chat(self, message: str, session_id: Optional[str] = None) -> tuple[str, str]:
         """
         Process a user message and return response.

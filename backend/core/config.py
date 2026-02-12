@@ -59,6 +59,9 @@ class Settings(BaseSettings):
 
     # Feature flags
     ff_interpret_warmup: bool = Field(default=True, alias="FF_INTERPRET_WARMUP")
+    ff_router_enabled: bool = Field(default=True, alias="FF_ROUTER_ENABLED")
+    ff_abstract_fastpath: bool = Field(default=True, alias="FF_ABSTRACT_FASTPATH")
+    ff_direct_fastpath: bool = Field(default=False, alias="FF_DIRECT_FASTPATH")
 
     class Config:
         env_file = ".env"
