@@ -12,7 +12,7 @@ import re
 import uuid
 from time import perf_counter
 from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 
 import sys
 from pathlib import Path
@@ -23,10 +23,8 @@ sys.path.insert(0, str(project_root))
 
 from src.agent import ShoppingAgent
 from src.agent_cache import AgentResponseCache
-from src.mcp_client import InterpretMCPClient, SearchMCPClient
 from src.logging_config import get_logger
 from src.pipeline_logger import log_latency_summary
-from backend.api.schemas import ProductInfo, ChatMetadata
 from backend.core.config import settings
 
 logger = get_logger(__name__)
@@ -44,15 +42,11 @@ class AgentService:
         self._agent: Optional[ShoppingAgent] = None
         self._initialized = False
         self._cache: Optional[AgentResponseCache] = None
-        self._interpret_client: Optional[InterpretMCPClient] = None
-        self._search_client: Optional[SearchMCPClient] = None
 
     async def initialize(self) -> None:
         """Initialize the agent and response cache (lazy loading)."""
         if not self._initialized:
             self._agent = ShoppingAgent()
-            self._interpret_client = InterpretMCPClient(settings.mcp_interpret_url, timeout=30.0)
-            self._search_client = SearchMCPClient(settings.mcp_search_url, timeout=60.0)
             self._initialized = True
 
             # Initialize agent response cache
@@ -74,200 +68,6 @@ class AgentService:
         if not self._initialized or self._agent is None:
             raise RuntimeError("Agent not initialized. Call initialize() first.")
         return self._agent
-
-    @staticmethod
-    def _build_direct_search_params(interpret_result: dict[str, Any], fallback_query: str) -> dict[str, Any]:
-        """Build normalized search params from interpret output."""
-        search_params = interpret_result.get("search_params", {}) if isinstance(interpret_result, dict) else {}
-
-        product = search_params.get("product") or fallback_query
-        intent = search_params.get("intent", "browse")
-        brand = search_params.get("brand")
-        categories_fa = search_params.get("categories_fa", []) or []
-        price_range = search_params.get("price_range", {}) or {}
-
-        final_search_params: dict[str, Any] = {
-            "product": product,
-            "intent": intent,
-            "persian_full_query": search_params.get("persian_full_query") or product,
-        }
-
-        if brand and str(brand).strip():
-            final_search_params["brand"] = brand
-
-        filtered_categories = [c for c in categories_fa if c and str(c).strip()]
-        if filtered_categories:
-            final_search_params["categories_fa"] = filtered_categories
-
-        normalized_price_range: dict[str, int] = {}
-        if isinstance(price_range, dict):
-            if price_range.get("min") and price_range["min"] > 0:
-                normalized_price_range["min"] = price_range["min"]
-            if price_range.get("max") and price_range["max"] > 0:
-                normalized_price_range["max"] = price_range["max"]
-        if normalized_price_range:
-            final_search_params["price_range"] = normalized_price_range
-
-        return final_search_params
-
-    @staticmethod
-    def _format_direct_products(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Map search server results to API ProductInfo fields."""
-        products: list[dict[str, Any]] = []
-        for item in results or []:
-            products.append(
-                {
-                    "id": str(item.get("id", "")),
-                    "name": str(item.get("product_name", "")),
-                    "brand": item.get("brand_name"),
-                    "price": float(item.get("price", 0) or 0),
-                    "discount_price": item.get("discount_price"),
-                    "has_discount": bool(item.get("has_discount", False)),
-                    "discount_percentage": float(item.get("discount_percentage", 0) or 0),
-                    "product_url": item.get("product_url"),
-                }
-            )
-        return products
-
-    @staticmethod
-    def _build_no_results_response(search_params: dict[str, Any]) -> str:
-        """Build user-facing alternatives when search returns no products."""
-        suggestions: list[str] = []
-        if search_params.get("brand"):
-            suggestions.append("همین محصول بدون محدودیت برند")
-        price_range = search_params.get("price_range", {}) or {}
-        if price_range.get("max"):
-            suggestions.append("افزایش سقف بودجه")
-        if price_range.get("min"):
-            suggestions.append("کاهش حداقل بودجه")
-        suggestions.extend(
-            [
-                "عبارت کوتاه‌تر از همین محصول",
-                "یک دسته نزدیک به همین محصول",
-            ]
-        )
-        suggestion_lines = "\n".join([f"🛒 {s}" for s in suggestions[:5]])
-        return (
-            "متأسفانه با این شرط‌ها نتیجه‌ای پیدا نشد. "
-            "برای ادامه یکی از گزینه‌های زیر رو انتخاب کن:\n"
-            f"{suggestion_lines}"
-        )
-
-    @staticmethod
-    def _build_memory_snapshot_text(products: list[dict[str, Any]]) -> str:
-        """
-        Build a compact numbered snapshot of search results for session memory.
-        Keeps references (1st/2nd/...) resolvable in later turns.
-        """
-        if not products:
-            return "برای این جستجو نتیجه‌ای پیدا نشد."
-
-        lines = ["نتایج جستجوی قبلی:"]
-        for idx, item in enumerate(products[:10], start=1):
-            name = str(item.get("name", "")).strip()
-            brand = str(item.get("brand", "") or "").strip()
-            pid = str(item.get("id", "")).strip()
-            price = int(float(item.get("price", 0) or 0))
-
-            detail_parts = []
-            if brand:
-                detail_parts.append(f"برند: {brand}")
-            if price > 0:
-                detail_parts.append(f"قیمت: {price:,}")
-            if pid:
-                detail_parts.append(f"id={pid}")
-
-            details = " | ".join(detail_parts)
-            if details:
-                lines.append(f"{idx}) {name} ({details})")
-            else:
-                lines.append(f"{idx}) {name}")
-
-        return "\n".join(lines)
-
-    async def _try_direct_delivery(
-        self,
-        message: str,
-        session_id: str,
-        timings: dict[str, int],
-    ) -> Optional[dict[str, Any]]:
-        """
-        Direct pipeline for direct queries: interpret -> search -> return.
-        Returns None when query is not direct or if direct pipeline fails.
-        """
-        if not settings.direct_delivery_bypass_agent:
-            return None
-        if self._interpret_client is None or self._search_client is None:
-            return None
-
-        try:
-            stage_start = perf_counter()
-            interpret_result = await self._interpret_client.interpret_query(
-                query=message,
-                session_id=session_id,
-                context={},
-            )
-            timings["direct_interpret_ms"] = int((perf_counter() - stage_start) * 1000)
-        except Exception as e:
-            logger.warning(f"Direct delivery interpret failed, fallback to agent: {e}")
-            return None
-
-        if not isinstance(interpret_result, dict):
-            return None
-        if not interpret_result.get("success", True):
-            return None
-        if interpret_result.get("query_type") != "direct" or not interpret_result.get("searchable"):
-            return None
-
-        search_params = self._build_direct_search_params(interpret_result, message)
-
-        try:
-            stage_start = perf_counter()
-            search_result = await self._search_client.search_products(
-                search_params=search_params,
-                session_id=session_id,
-                use_cache=True,
-                use_semantic=True,
-            )
-            timings["direct_search_ms"] = int((perf_counter() - stage_start) * 1000)
-        except Exception as e:
-            logger.warning(f"Direct delivery search failed, fallback to agent: {e}")
-            return None
-
-        if not isinstance(search_result, dict) or not search_result.get("success", False):
-            return None
-
-        products = self._format_direct_products(search_result.get("results", []))
-        total_hits = int(search_result.get("total_hits", len(products)) or len(products))
-
-        if not products:
-            return {
-                "success": True,
-                "response": self._build_no_results_response(search_params),
-                "session_id": session_id,
-                "products": [],
-                "metadata": {
-                    "took_ms": int(search_result.get("took_ms", 0) or 0),
-                    "query_type": "no_results",
-                    "total_results": 0,
-                    "from_agent_cache": False,
-                    "latency_breakdown_ms": timings,
-                },
-            }
-
-        return {
-            "success": True,
-            "response": "این محصولات رو پیدا کردم",
-            "session_id": session_id,
-            "products": products,
-            "metadata": {
-                "took_ms": int(search_result.get("took_ms", 0) or 0),
-                "query_type": "direct",
-                "total_results": total_hits,
-                "from_agent_cache": False,
-                "latency_breakdown_ms": timings,
-            },
-        }
 
     async def chat(
         self,
@@ -327,57 +127,6 @@ class AgentService:
         else:
             timings["agent_cache_lookup_ms"] = 0
 
-        # ── Direct delivery bypass (interpret -> search -> return) ───────────
-        if settings.direct_delivery_bypass_agent:
-            stage_start = perf_counter()
-            direct_result = await self._try_direct_delivery(message, session_id, timings)
-            timings["direct_bypass_ms"] = int((perf_counter() - stage_start) * 1000)
-            if direct_result is not None:
-                took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
-                direct_result.setdefault("metadata", {})
-                direct_result["metadata"]["took_ms"] = took_ms
-                direct_result["metadata"]["from_agent_cache"] = False
-                direct_result["metadata"]["latency_breakdown_ms"] = timings
-
-                direct_query_type = direct_result.get("metadata", {}).get("query_type") or "direct"
-                products = direct_result.get("products", []) or []
-                if direct_query_type == "direct" and products:
-                    memory_text = self._build_memory_snapshot_text(products)
-                    try:
-                        memory_start = perf_counter()
-                        await self.agent.persist_external_turn(
-                            session_id=session_id,
-                            user_message=message,
-                            assistant_message=memory_text,
-                        )
-                        timings["memory_persist_ms"] = int((perf_counter() - memory_start) * 1000)
-                    except Exception as e:
-                        timings["memory_persist_ms"] = 0
-                        logger.warning(f"Direct bypass memory persist failed: {e}")
-                else:
-                    timings["memory_persist_ms"] = 0
-
-                if self._cache and self._cache.available and direct_query_type == "direct" and products:
-                    cache_set_start = perf_counter()
-                    await self._cache.set(message, direct_result)
-                    timings["agent_cache_set_ms"] = int((perf_counter() - cache_set_start) * 1000)
-                else:
-                    timings["agent_cache_set_ms"] = 0
-
-                log_latency_summary(
-                    "AGENT",
-                    "agent_service.chat",
-                    int((perf_counter() - request_start) * 1000),
-                    breakdown_ms=timings,
-                    meta={
-                        "cache": "direct_bypass",
-                        "query_type": direct_query_type,
-                        "success": True,
-                        "products": len(products),
-                    },
-                )
-                return direct_result
-        
         # ── Cache miss → full pipeline ─────────────────────────────
         try:
             # Call agent with timeout
@@ -735,10 +484,20 @@ class AgentService:
         """
         Remove JSON product block from response, keep only the intro text.
         """
-        if not products:
-            return response
+        clean = (response or "").strip()
+        for prefix in (
+            "🔍 SEARCH_RESULTS:",
+            "❓ NEED_CLARIFICATION:",
+            "❌ NO_RESULTS:",
+            "✅ CACHED_RESPONSE:",
+        ):
+            if clean.startswith(prefix):
+                clean = clean[len(prefix):].strip()
+                break
 
-        clean = response or ""
+        if not products:
+            return clean
+
         clean = re.sub(r'```[\t ]*(?:json)?[\s\S]*?```', '', clean, flags=re.IGNORECASE).strip()
         clean = re.sub(r'json```[\s\S]*?```', '', clean, flags=re.IGNORECASE).strip()
         clean = re.sub(r'\[\s*\{[\s\S]*?\}\s*(?:,\s*\{[\s\S]*?\}\s*)*\]', '', clean, flags=re.DOTALL).strip()

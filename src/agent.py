@@ -12,7 +12,7 @@ from time import perf_counter
 from contextvars import ContextVar
 from typing import Optional
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
@@ -303,7 +303,7 @@ def get_search_client() -> SearchMCPClient:
 # ============================================================================
 
 
-@tool
+@tool(return_direct=True)
 async def search_and_deliver(query: str) -> str:
     """
     Interpret user query, search for products, and return formatted results.
@@ -721,12 +721,37 @@ class ShoppingAgent:
         log_agent("ShoppingAgent initialized", {"tools": [t.name for t in self.tools]})
 
     @staticmethod
+    def _message_content_to_text(content) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text")
+                    if text:
+                        parts.append(str(text))
+                else:
+                    parts.append(str(item))
+            return "\n".join(p for p in parts if p).strip()
+        if content is None:
+            return ""
+        return str(content)
+
+    @staticmethod
     def _extract_text_response(result: dict) -> str:
         response = ""
         for msg in reversed(result.get("messages", [])):
             if isinstance(msg, AIMessage) and msg.content:
-                response = msg.content
-                break
+                response = ShoppingAgent._message_content_to_text(msg.content)
+                if response:
+                    break
+            if isinstance(msg, ToolMessage) and msg.content:
+                response = ShoppingAgent._message_content_to_text(msg.content)
+                if response:
+                    break
         return response
 
     @staticmethod
