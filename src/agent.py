@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     openrouter_model: str = Field(default="meta-llama/llama-3.3-70b-instruct", alias="OPENROUTER_MODEL")
     openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL")
     openrouter_provider_order: str = Field(default="", alias="OPENROUTER_PROVIDER_ORDER")
+    openrouter_fallback_to_groq: bool = Field(default=True, alias="OPENROUTER_FALLBACK_TO_GROQ")
 
     # Groq fallback
     groq_api_key: str = Field(default="", alias="GROQ_API_KEY")
@@ -65,6 +66,8 @@ class Settings(BaseSettings):
     redis_password: str = Field(default="", alias="REDIS_PASSWORD")
     redis_db: int = Field(default=0, alias="REDIS_DB")
     llm_cache_ttl: int = Field(default=86400, alias="LLM_CACHE_TTL")  # 24h
+    agent_recursion_limit: int = Field(default=12, alias="AGENT_RECURSION_LIMIT")
+    max_search_tool_calls_per_turn: int = Field(default=3, alias="MAX_SEARCH_TOOL_CALLS_PER_TURN")
 
     class Config:
         env_file = ".env"
@@ -90,6 +93,7 @@ _last_search_cache_key: Optional[str] = None  # Tracks current search key for po
 _llm_cache_hit: bool = False  # Flag: True when Level 3 cache was hit inside search_products
 _llm_cached_response: Optional[str] = None  # Holds the cached LLM response when Level 3 hits
 _active_session_id: ContextVar[str] = ContextVar("active_session_id", default="")
+_search_tool_calls: ContextVar[int] = ContextVar("search_tool_calls", default=0)
 
 
 def _get_active_session_id() -> str:
@@ -328,11 +332,26 @@ async def search_and_deliver(query: str) -> str:
         current_trace = get_current_trace()
         trace_id = current_trace.trace_id if current_trace else None
         request_session_id = _get_active_session_id()
+        tool_calls = _search_tool_calls.get() + 1
+        _search_tool_calls.set(tool_calls)
 
         log_agent("search_and_deliver called", {
             "query": query,
             "session": request_session_id[:8],
+            "tool_calls_this_turn": tool_calls,
         })
+
+        if tool_calls > settings.max_search_tool_calls_per_turn:
+            log_agent("search_and_deliver loop guard triggered", {
+                "tool_calls_this_turn": tool_calls,
+                "max_allowed": settings.max_search_tool_calls_per_turn,
+            })
+            return (
+                "❓ NEED_CLARIFICATION:برای اینکه نتیجه دقیق‌تری بگیرم، لطفاً یکی از این گزینه‌ها رو مشخص کنید:\n"
+                "🛍️ نوع دقیق محصول\n"
+                "💰 بازه بودجه نزدیک‌تر\n"
+                "🏷️ برند ترجیحی"
+            )
 
         # ── Step 1: Interpret the query ──
         interpret_client = get_interpret_client()
@@ -472,7 +491,23 @@ async def search_and_deliver(query: str) -> str:
                 meta={"result": "no_results", "product": product},
             )
             _last_search_cache_key = None
-            return "❌ NO_RESULTS:متأسفانه محصول مورد نظر شما یافت نشد. میتونید با کلمات دیگه جستجو کنید."
+            suggestions: list[str] = []
+            if brand:
+                suggestions.append("همین محصول بدون محدودیت برند")
+            if price_range and price_range.get("max"):
+                suggestions.append("افزایش سقف بودجه")
+            if price_range and price_range.get("min"):
+                suggestions.append("کاهش حداقل بودجه")
+            suggestions.extend([
+                "عبارت کوتاه‌تر از همین محصول",
+                "یک دسته نزدیک به همین محصول",
+            ])
+            suggestion_lines = "\n".join([f"🛒 {s}" for s in suggestions[:5]])
+            return (
+                "❓ NEED_CLARIFICATION:متأسفانه با این شرط‌ها نتیجه‌ای پیدا نشد. "
+                "یکی از گزینه‌های زیر رو انتخاب کنید تا دوباره دقیق‌تر جستجو کنم:\n"
+                f"{suggestion_lines}"
+            )
 
         # Format as ready-to-show response
         formatted_products = []
@@ -646,15 +681,60 @@ class ShoppingAgent:
         
         self.tools = [search_and_deliver, get_product_details]
         self.memory = MemorySaver()
-        
+        self._fallback_agent = None
+        self._provider = provider
+        self._model_name = model
+
         self.agent = create_react_agent(
             model=self.llm,
             tools=self.tools,
             checkpointer=self.memory,
             prompt=SYSTEM_PROMPT,
         )
+
+        if (
+            provider == "openrouter"
+            and settings.openrouter_fallback_to_groq
+            and settings.groq_api_key
+        ):
+            try:
+                fallback_llm = ChatOpenAI(
+                    api_key=settings.groq_api_key,
+                    base_url=settings.groq_base_url,
+                    model=settings.groq_model,
+                    temperature=0.3,
+                )
+                self._fallback_agent = create_react_agent(
+                    model=fallback_llm,
+                    tools=self.tools,
+                    checkpointer=self.memory,
+                    prompt=SYSTEM_PROMPT,
+                )
+                log_agent(
+                    "OpenRouter fallback agent enabled",
+                    {"provider": "groq", "model": settings.groq_model},
+                )
+            except Exception as e:
+                log_error("AGENT", f"Failed to initialize fallback agent: {e}", e)
         
         log_agent("ShoppingAgent initialized", {"tools": [t.name for t in self.tools]})
+
+    @staticmethod
+    def _extract_text_response(result: dict) -> str:
+        response = ""
+        for msg in reversed(result.get("messages", [])):
+            if isinstance(msg, AIMessage) and msg.content:
+                response = msg.content
+                break
+        return response
+
+    @staticmethod
+    def _is_tool_support_error(err: Exception) -> bool:
+        text = str(err or "")
+        return (
+            "No endpoints found that support tool use" in text
+            or ("Error code: 404" in text and "tool use" in text.lower())
+        )
 
     async def chat(self, message: str, session_id: Optional[str] = None) -> tuple[str, str]:
         """
@@ -686,12 +766,16 @@ class ShoppingAgent:
         session_token = _active_session_id.set(session_id)
         try:
             with trace_query(message, session_id):
-                config = {"configurable": {"thread_id": session_id}}
+                config = {
+                    "configurable": {"thread_id": session_id},
+                    "recursion_limit": settings.agent_recursion_limit,
+                }
 
                 # Reset trackers before each message
                 _last_search_cache_key = None
                 _llm_cache_hit = False
                 _llm_cached_response = None
+                search_tool_token = _search_tool_calls.set(0)
 
                 log_agent("Processing message", {"session": session_id[:8], "message": message[:50]})
 
@@ -704,11 +788,7 @@ class ShoppingAgent:
                     )
                     timings["react_ainvoke_ms"] = int((perf_counter() - ainvoke_start) * 1000)
 
-                    response = ""
-                    for msg in reversed(result.get("messages", [])):
-                        if isinstance(msg, AIMessage) and msg.content:
-                            response = msg.content
-                            break
+                    response = self._extract_text_response(result)
 
                     if not response:
                         response = "متأسفانه نتونستم پاسخ مناسبی پیدا کنم. لطفاً دوباره سوالتون رو بپرسید."
@@ -761,6 +841,33 @@ class ShoppingAgent:
                     return response, session_id
 
                 except Exception as e:
+                    if self._is_tool_support_error(e) and self._fallback_agent is not None:
+                        log_error(
+                            "AGENT",
+                            "Primary model lacks tool-use endpoint; switching to fallback model",
+                            e,
+                        )
+                        try:
+                            fallback_start = perf_counter()
+                            fallback_result = await self._fallback_agent.ainvoke(
+                                {"messages": [HumanMessage(content=message)]},
+                                config=config,
+                            )
+                            timings["fallback_ainvoke_ms"] = int((perf_counter() - fallback_start) * 1000)
+                            fallback_response = self._extract_text_response(fallback_result)
+                            if not fallback_response:
+                                fallback_response = "متأسفانه نتونستم پاسخ مناسبی پیدا کنم. لطفاً دوباره سوالتون رو بپرسید."
+                            log_latency_summary(
+                                "AGENT",
+                                "agent.chat",
+                                int((perf_counter() - chat_start) * 1000),
+                                breakdown_ms=timings,
+                                meta={"success": True, "fallback_model_used": True},
+                            )
+                            return fallback_response, session_id
+                        except Exception as fallback_error:
+                            log_error("AGENT", f"Fallback model failed: {fallback_error}", fallback_error)
+
                     error_text = str(e)
                     if "tool_calls that do not have a corresponding ToolMessage" in error_text:
                         new_session_id = str(uuid.uuid4())
@@ -812,7 +919,9 @@ class ShoppingAgent:
                         breakdown_ms=timings,
                         meta={"success": False},
                     )
-                    return f"متأسفانه مشکلی پیش اومد: {str(e)}", session_id
+                    return f"__AGENT_ERROR__:{str(e)}", session_id
+                finally:
+                    _search_tool_calls.reset(search_tool_token)
         finally:
             _active_session_id.reset(session_token)
 

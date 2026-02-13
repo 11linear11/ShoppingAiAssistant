@@ -105,8 +105,6 @@ class QueryType(str, Enum):
     """Types of user queries."""
 
     DIRECT = "direct"
-    ABSTRACT = "abstract"
-    FOLLOW_UP = "follow_up"
     UNCLEAR = "unclear"
 
 
@@ -299,12 +297,15 @@ class QueryInterpreter:
                 },
             )
 
-        # Quick check: is it just a number? (follow-up selection)
+        # Quick check: a bare number is not search-ready here.
         if normalized.strip().isdigit():
-            log_interpret("Detected number selection", {"number": normalized})
-            response = self._handle_number_selection(normalized.strip(), context)
+            log_interpret("Detected bare numeric query -> unclear", {"number": normalized})
+            response = self._build_unclear_response({
+                "suggested_products": [],
+                "reasoning": "numeric_only",
+            })
             _log_summary(
-                query_type=response.get("query_type", "follow_up"),
+                query_type=response.get("query_type", "unclear"),
                 searchable=bool(response.get("searchable")),
             )
             return response
@@ -324,7 +325,7 @@ class QueryInterpreter:
         timings["llm_classification_ms"] = int((perf_counter() - llm_start) * 1000)
 
         # Process based on type
-        query_type_str = llm_result.get("query_type", "direct")
+        query_type_str = self._coerce_query_type(llm_result.get("query_type", "unclear"))
         log_interpret(
             f"Query type: {query_type_str}",
             {"reasoning": llm_result.get("reasoning", "")[:100]},
@@ -349,51 +350,16 @@ class QueryInterpreter:
             )
             return response
 
-        elif query_type_str == "abstract":
-            build_start = perf_counter()
-            response = self._build_abstract_response(llm_result, normalized)
-            timings["build_response_ms"] = int((perf_counter() - build_start) * 1000)
-            log_interpret(
-                "✅ ABSTRACT response",
-                {
-                    "suggestions": [
-                        s.get("product")
-                        for s in response.get("clarification", {}).get(
-                            "suggestions", []
-                        )
-                    ]
-                },
-            )
-            _log_summary(
-                query_type=response.get("query_type", "abstract"),
-                searchable=bool(response.get("searchable")),
-            )
-            return response
-
-        elif query_type_str == "follow_up":
-            build_start = perf_counter()
-            response = self._build_followup_response(llm_result, context)
-            timings["build_response_ms"] = int((perf_counter() - build_start) * 1000)
-            log_interpret(
-                "✅ FOLLOW_UP response",
-                {"session_update": response.get("session_update")},
-            )
-            _log_summary(
-                query_type=response.get("query_type", "follow_up"),
-                searchable=bool(response.get("searchable")),
-            )
-            return response
-
-        else:  # UNCLEAR
-            build_start = perf_counter()
-            response = self._build_unclear_response(llm_result)
-            timings["build_response_ms"] = int((perf_counter() - build_start) * 1000)
-            log_interpret("✅ UNCLEAR response")
-            _log_summary(
-                query_type=response.get("query_type", "unclear"),
-                searchable=bool(response.get("searchable")),
-            )
-            return response
+        # Any non-direct signal is treated as unclear in current architecture.
+        build_start = perf_counter()
+        response = self._build_unclear_response(llm_result)
+        timings["build_response_ms"] = int((perf_counter() - build_start) * 1000)
+        log_interpret("✅ UNCLEAR response")
+        _log_summary(
+            query_type=response.get("query_type", "unclear"),
+            searchable=bool(response.get("searchable")),
+        )
+        return response
 
     def _normalize_persian(self, text: str) -> str:
         """Normalize Persian text."""
@@ -410,16 +376,55 @@ class QueryInterpreter:
             text = text.replace(ar, fa)
         return re.sub(r"\s+", " ", text).strip()
 
-    def _handle_number_selection(self, number: str, context: dict) -> dict[str, Any]:
-        """Handle numeric selection (follow-up)."""
-        return {
-            "query_type": "follow_up",
-            "searchable": True,
-            "session_update": {
-                "selection": int(number),
-                "selection_type": "numeric",
-            },
+    @staticmethod
+    def _coerce_query_type(raw_type: Any) -> str:
+        q = str(raw_type or "").strip().lower()
+        return "direct" if q == QueryType.DIRECT.value else QueryType.UNCLEAR.value
+
+    @staticmethod
+    def _safe_int(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            cleaned = value.strip().replace(",", "")
+            if not cleaned:
+                return None
+            try:
+                return int(float(cleaned))
+            except Exception:
+                return None
+        return None
+
+    def _repair_classification(self, llm_result: dict) -> dict:
+        out = dict(llm_result or {})
+        out["query_type"] = self._coerce_query_type(out.get("query_type"))
+
+        # Intent normalization
+        intent = str(out.get("intent") or "").strip().lower()
+        if intent not in {"browse", "find_cheapest", "find_best", "compare"}:
+            intent = "browse"
+        out["intent"] = intent
+
+        # Price range normalization (model-provided only)
+        price_range = out.get("price_range") if isinstance(out.get("price_range"), dict) else {}
+        price_range = {
+            "min": self._safe_int(price_range.get("min")),
+            "max": self._safe_int(price_range.get("max")),
         }
+        out["price_range"] = price_range
+
+        out["product"] = str(out.get("product") or "").strip()
+        brand = str(out.get("brand") or "").strip()
+        out["brand"] = brand or None
+
+        if out["query_type"] == "direct" and not out.get("product"):
+            out["query_type"] = "unclear"
+
+        return out
 
     async def _classify_and_extract(self, query: str, context: dict) -> dict:
         """Use LLM to classify AND extract in one call."""
@@ -430,48 +435,32 @@ class QueryInterpreter:
         if context.get("last_query"):
             context_str += f"\nPrevious query: {context['last_query']}"
 
-        prompt = f"""You are a Persian shopping query analyzer.
+        prompt = f"""You are a strict Persian shopping query analyzer.
 
 User query: "{query}"
 {context_str}
 
-Analyze this query and return a JSON response.
+Analyze this query and return JSON only.
 
-## CLASSIFICATION RULES:
+## Allowed query_type values:
+- direct
+- unclear
 
-### DIRECT (most common):
-Use when user mentions ANY specific product name, even with modifiers like "cheapest", "best", etc.
+## DIRECT:
+Use when user request is search-ready and includes a concrete product/product-type.
 Examples:
-- "یخچال" → DIRECT (product: یخچال)
-- "ارزون ترین یخچال" → DIRECT (product: یخچال, intent: find_cheapest)
-- "بهترین گوشی سامسونگ" → DIRECT (product: گوشی, brand: سامسونگ, intent: find_best)
-- "لپتاپ زیر ۲۰ میلیون" → DIRECT (product: لپتاپ, price_range.max: 20000000)
-- "شورت مردانه" → DIRECT (product: شورت مردانه)
-- "پاستیل" → DIRECT (product: پاستیل)
-- "ارزون ترین پاستیل" → DIRECT (product: پاستیل, intent: find_cheapest)
+- "شورت مردانه"
+- "ارزان ترین شامپو"
+- "گوشی سامسونگ زیر 20 میلیون"
 
-### ABSTRACT:
-Use ONLY when user describes a feeling/need WITHOUT any product name.
+## UNCLEAR:
+Use for greetings, vague/abstract needs, pure follow-up references, or non-search-ready text.
 Examples:
-- "خسته‌ام" → ABSTRACT
-- "میخوام آروم بشم" → ABSTRACT  
-- "یه چیز خوب میخوام" → ABSTRACT (no product specified)
-
-### FOLLOW_UP:
-Use ONLY when user refers to previous results with pronouns or ordinals WITHOUT mentioning a product.
-Examples:
-- "اولی" → FOLLOW_UP (referring to item 1)
-- "همون" → FOLLOW_UP
-- "این یکی" → FOLLOW_UP
-- "شماره ۳" → FOLLOW_UP
-NOT follow_up:
-- "ارزون ترین پاستیل" → This is DIRECT (has product name "پاستیل")
-
-### UNCLEAR:
-Use when query is too short or meaningless.
-Examples:
-- "اه" → UNCLEAR
-- "چی" → UNCLEAR
+- "سلام"
+- "یه چیزی میخوام"
+- "اولی"
+- "همون"
+- "اه"
 
 ## INTENT VALUES:
 - browse: just looking (default)
@@ -481,25 +470,22 @@ Examples:
 
 Return JSON only:
 {{
-    "query_type": "direct|abstract|follow_up|unclear",
+    "query_type": "direct|unclear",
     "confidence": 0.0-1.0,
     "reasoning": "short explanation in Persian",
-    "product": "product name or null",
+    "product": "required when direct, else null",
     "brand": "brand name or null",
     "price_range": {{"min": null, "max": null}},
     "intent": "browse|find_cheapest|find_best|compare",
-    "feeling": "user feeling for abstract only",
-    "suggested_products": ["suggestion1", "suggestion2", "suggestion3"],
-    "reference_type": "ordinal|pronoun for follow_up",
-    "reference_value": "reference value"
+    "suggested_products": ["suggestion1", "suggestion2", "suggestion3"]
 }}
 
 Return only valid JSON."""
 
-        system_prompt = """You are a smart shopping query analyzer.
+        system_prompt = """You are a strict shopping query analyzer.
 Always return only valid JSON.
-If a product name is mentioned, it's DIRECT - not ABSTRACT.
-"ارزون ترین X" means DIRECT with intent=find_cheapest, not ABSTRACT."""
+Return only direct or unclear.
+If brand/price exists in query, extract it."""
 
         try:
             response = await self.llm.generate(
@@ -510,22 +496,24 @@ If a product name is mentioned, it's DIRECT - not ABSTRACT.
 
             json_match = re.search(r"\{.*\}", response, re.DOTALL)
             if json_match:
-                return json.loads(json_match.group())
+                parsed = json.loads(json_match.group())
             else:
-                return {"query_type": "direct", "product": query}
+                parsed = {"query_type": "unclear"}
+            return self._repair_classification(parsed)
 
         except json.JSONDecodeError:
-            return {"query_type": "direct", "product": query}
+            return self._repair_classification({"query_type": "unclear"})
         except Exception as e:
             log_error("INTERPRET", f"LLM classify/extract error: {e}", e)
-            return {"query_type": "direct", "product": query}
+            return self._repair_classification({"query_type": "unclear"})
 
     async def _build_direct_response(
         self, llm_result: dict, query: str
     ) -> dict[str, Any]:
         """Build response for DIRECT queries."""
 
-        product = llm_result.get("product", query)
+        repaired = self._repair_classification(llm_result)
+        product = repaired.get("product", query)
         with trace_stage("INTERPRET", "Category matching"):
             categories = await self._match_categories(product)
 
@@ -533,13 +521,13 @@ If a product name is mentioned, it's DIRECT - not ABSTRACT.
             "query_type": "direct",
             "searchable": True,
             "search_params": {
-                "intent": llm_result.get("intent", "browse"),
+                "intent": repaired.get("intent", "browse"),
                 "product": product,
-                "brand": llm_result.get("brand"),
+                "brand": repaired.get("brand"),
                 "persian_full_query": query,
                 "categories_fa": categories,
-                "attributes": llm_result.get("attributes", {}),
-                "price_range": llm_result.get("price_range", {}),
+                "attributes": repaired.get("attributes", {}),
+                "price_range": repaired.get("price_range", {}),
             },
             "session_update": {
                 "last_query": query,
@@ -547,65 +535,23 @@ If a product name is mentioned, it's DIRECT - not ABSTRACT.
             },
         }
 
-    def _build_abstract_response(
-        self, llm_result: dict, query: str
-    ) -> dict[str, Any]:
-        """Build response for ABSTRACT queries."""
-
-        suggested = llm_result.get("suggested_products", [])
-        feeling = llm_result.get("feeling", "")
-
-        emojis = ["🛒", "👕", "🧥", "👟", "📱", "💻", "🎁", "🔥"]
-        suggestions = []
-        for i, prod in enumerate(suggested[:5], 1):
-            suggestions.append(
-                {
-                    "id": i,
-                    "product": prod,
-                    "emoji": emojis[i % len(emojis)],
-                    "reason": f"پیشنهاد برای {feeling}" if feeling else "پیشنهاد",
-                    "search_query": prod,
-                }
-            )
-
-        question = "دنبال چه محصولی هستید؟"
-        if feeling:
-            question = f"برای {feeling}، کدوم محصول رو می‌خواید؟"
-
-        return {
-            "query_type": "abstract",
-            "searchable": False,
-            "clarification": {
-                "needed": True,
-                "question": question,
-                "suggestions": suggestions,
-            },
-            "session_update": {
-                "last_query": query,
-                "abstract_pattern": feeling,
-                "pending_suggestions": [s["product"] for s in suggestions],
-            },
-        }
-
-    def _build_followup_response(
-        self, llm_result: dict, context: dict
-    ) -> dict[str, Any]:
-        """Build response for FOLLOW_UP queries."""
-
-        ref_type = llm_result.get("reference_type", "ordinal")
-        ref_value = llm_result.get("reference_value", "1")
-
-        return {
-            "query_type": "follow_up",
-            "searchable": True,
-            "session_update": {
-                "selection": ref_value,
-                "selection_type": ref_type,
-            },
-        }
-
     def _build_unclear_response(self, llm_result: dict) -> dict[str, Any]:
         """Build response for UNCLEAR queries."""
+
+        raw_suggestions = llm_result.get("suggested_products", []) if isinstance(llm_result, dict) else []
+        suggestions = []
+        emojis = ["🛒", "🎁", "📱", "👟", "👕"]
+        for i, item in enumerate(raw_suggestions[:5], 1):
+            name = str(item or "").strip()
+            if not name:
+                continue
+            suggestions.append({
+                "id": i,
+                "product": name,
+                "emoji": emojis[(i - 1) % len(emojis)],
+                "reason": "گزینه پیشنهادی",
+                "search_query": name,
+            })
 
         return {
             "query_type": "unclear",
@@ -613,7 +559,7 @@ If a product name is mentioned, it's DIRECT - not ABSTRACT.
             "clarification": {
                 "needed": True,
                 "question": "لطفاً دقیق‌تر بگید دنبال چه محصولی هستید؟",
-                "suggestions": [],
+                "suggestions": suggestions,
             },
         }
 
@@ -762,7 +708,7 @@ async def interpret_query(
     Interpret a user query.
 
     Uses LLM to:
-    1. Classify query type (direct/abstract/follow_up/unclear)
+    1. Classify query type (direct/unclear)
     2. Extract structured data (product, brand, attributes, etc.)
 
     Args:

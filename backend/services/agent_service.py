@@ -137,6 +137,31 @@ class AgentService:
                 timeout=timeout,
             )
             timings["agent_chat_ms"] = int((perf_counter() - stage_start) * 1000)
+
+            if isinstance(response, str) and response.startswith("__AGENT_ERROR__:"):
+                error_text = response.replace("__AGENT_ERROR__:", "", 1).strip()
+                took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+                log_latency_summary(
+                    "AGENT",
+                    "agent_service.chat",
+                    int((perf_counter() - request_start) * 1000),
+                    breakdown_ms=timings,
+                    meta={"cache": "miss", "query_type": "error", "success": False},
+                )
+                return {
+                    "success": False,
+                    "response": "متأسفانه مشکلی پیش اومد. لطفاً دوباره تلاش کنید.",
+                    "session_id": session_id,
+                    "products": [],
+                    "metadata": {
+                        "took_ms": took_ms,
+                        "query_type": "error",
+                        "total_results": 0,
+                        "from_agent_cache": False,
+                        "latency_breakdown_ms": timings,
+                    },
+                    "error": error_text,
+                }
             
             took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
             
