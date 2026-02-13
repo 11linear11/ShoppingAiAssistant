@@ -240,6 +240,8 @@ CLARIFY behavior:
 - Offer 3-5 concrete product-type suggestions.
 - Ask user to pick one.
 - Keep it short and practical.
+- If user answers with "فرقی نداره / مهم نیست / هرچی" after you asked for preference
+  and product-type is already known, switch to SEARCH immediately.
 
 ### SEARCH (use search_and_deliver exactly once)
 For concrete product requests:
@@ -250,6 +252,9 @@ For concrete product requests:
 
 Call:
 `search_and_deliver` with the user's exact request.
+
+When preference is optional and user says it does not matter,
+call `search_and_deliver` using the resolved product-type (broad query).
 
 ### DETAILS (usually no search)
 For follow-up references:
@@ -267,6 +272,12 @@ Rules:
 - If tool returns prefix "✅ CACHED_RESPONSE:", show content as-is (without prefix).
 - If tool returns prefix "❓ NEED_CLARIFICATION:", continue with CLARIFY.
 - If tool returns prefix "❌ NO_RESULTS:", explain shortly and offer alternatives.
+
+## Non-Negotiable Tool Rule
+- Never invent products, prices, ratings, discounts, links, or stock.
+- If user asks for product results and product-type is known, you MUST use tool first.
+- Without tool output, you may ask questions, but you must not output a fake result list.
+- Do not generate fields that are not present in tool output.
 
 ## Hard Safety Rule
 If uncertainty is noticeable, prefer CLARIFY over SEARCH.
@@ -677,7 +688,7 @@ class ShoppingAgent:
             "api_key": api_key,
             "base_url": base_url,
             "model": model,
-            "temperature": 0.3,
+            "temperature": 0.1,
         }
         if provider == "openrouter":
             provider_order = self._resolve_openrouter_provider_order()
@@ -716,7 +727,7 @@ class ShoppingAgent:
                     api_key=settings.groq_api_key,
                     base_url=settings.groq_base_url,
                     model=settings.groq_model,
-                    temperature=0.3,
+                    temperature=0.1,
                 )
                 self._fallback_agent = create_react_agent(
                     model=fallback_llm,
