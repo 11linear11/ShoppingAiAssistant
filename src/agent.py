@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     agent_model: str = Field(default="", alias="AGENT_MODEL")
 
     openrouter_api_key: str = Field(default="", alias="OPEN_ROUTERS_API_KEY")
-    openrouter_model: str = Field(default="qwen/qwen2.5-vl-32b-instruct", alias="OPENROUTER_MODEL")
+    openrouter_model: str = Field(default="meta-llama/llama-3.3-70b-instruct", alias="OPENROUTER_MODEL")
     openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL")
     openrouter_provider_order: str = Field(default="", alias="OPENROUTER_PROVIDER_ORDER")
 
