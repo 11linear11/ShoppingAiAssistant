@@ -366,10 +366,13 @@ async def interpret_query(query: str) -> str:
         
         client = get_interpret_client()
         mcp_call_start = perf_counter()
+        context = {"direct_unclear_only": True}
+        if trace_id:
+            context["trace_id"] = trace_id
         result = await client.interpret_query(
             query=query,
             session_id=request_session_id,
-            context={"trace_id": trace_id} if trace_id else {},
+            context=context,
         )
         mcp_call_ms = int((perf_counter() - mcp_call_start) * 1000)
         
