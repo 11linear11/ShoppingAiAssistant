@@ -153,6 +153,38 @@ class AgentService:
             f"{suggestion_lines}"
         )
 
+    @staticmethod
+    def _build_memory_snapshot_text(products: list[dict[str, Any]]) -> str:
+        """
+        Build a compact numbered snapshot of search results for session memory.
+        Keeps references (1st/2nd/...) resolvable in later turns.
+        """
+        if not products:
+            return "برای این جستجو نتیجه‌ای پیدا نشد."
+
+        lines = ["نتایج جستجوی قبلی:"]
+        for idx, item in enumerate(products[:10], start=1):
+            name = str(item.get("name", "")).strip()
+            brand = str(item.get("brand", "") or "").strip()
+            pid = str(item.get("id", "")).strip()
+            price = int(float(item.get("price", 0) or 0))
+
+            detail_parts = []
+            if brand:
+                detail_parts.append(f"برند: {brand}")
+            if price > 0:
+                detail_parts.append(f"قیمت: {price:,}")
+            if pid:
+                detail_parts.append(f"id={pid}")
+
+            details = " | ".join(detail_parts)
+            if details:
+                lines.append(f"{idx}) {name} ({details})")
+            else:
+                lines.append(f"{idx}) {name}")
+
+        return "\n".join(lines)
+
     async def _try_direct_delivery(
         self,
         message: str,
@@ -309,6 +341,22 @@ class AgentService:
 
                 direct_query_type = direct_result.get("metadata", {}).get("query_type") or "direct"
                 products = direct_result.get("products", []) or []
+                if direct_query_type == "direct" and products:
+                    memory_text = self._build_memory_snapshot_text(products)
+                    try:
+                        memory_start = perf_counter()
+                        await self.agent.persist_external_turn(
+                            session_id=session_id,
+                            user_message=message,
+                            assistant_message=memory_text,
+                        )
+                        timings["memory_persist_ms"] = int((perf_counter() - memory_start) * 1000)
+                    except Exception as e:
+                        timings["memory_persist_ms"] = 0
+                        logger.warning(f"Direct bypass memory persist failed: {e}")
+                else:
+                    timings["memory_persist_ms"] = 0
+
                 if self._cache and self._cache.available and direct_query_type == "direct" and products:
                     cache_set_start = perf_counter()
                     await self._cache.set(message, direct_result)

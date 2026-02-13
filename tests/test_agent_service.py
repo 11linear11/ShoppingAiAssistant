@@ -91,6 +91,7 @@ def test_chat_direct_bypass_skips_agent_chat():
     service = AgentService()
     service._initialized = True
     service._agent = AsyncMock()
+    service._agent.persist_external_turn = AsyncMock(return_value=True)
     service._interpret_client = object()
     service._search_client = object()
 
@@ -128,6 +129,20 @@ def test_chat_direct_bypass_skips_agent_chat():
     assert result["metadata"]["query_type"] == "direct"
     assert len(result["products"]) == 1
     assert service._agent.chat.await_count == 0
+    assert service._agent.persist_external_turn.await_count == 1
+
+
+def test_build_memory_snapshot_text_is_numbered_and_contains_id():
+    service = AgentService()
+    text = service._build_memory_snapshot_text(
+        [
+            {"id": "11", "name": "کفش", "brand": "X", "price": 1200000},
+            {"id": "12", "name": "شلوار", "brand": "Y", "price": 900000},
+        ]
+    )
+    assert "1) کفش" in text
+    assert "2) شلوار" in text
+    assert "id=11" in text
 
 
 def test_chat_agent_error_payload_contains_stage_and_type():

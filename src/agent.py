@@ -737,6 +737,42 @@ class ShoppingAgent:
             or ("Error code: 404" in text and "tool use" in text.lower())
         )
 
+    async def persist_external_turn(
+        self,
+        session_id: str,
+        user_message: str,
+        assistant_message: str,
+    ) -> bool:
+        """
+        Persist an externally generated turn (e.g. direct bypass results)
+        into the agent's session memory so follow-up references can work.
+        """
+        if not session_id or not user_message or not assistant_message:
+            return False
+
+        config = {"configurable": {"thread_id": session_id}}
+        values = {
+            "messages": [
+                HumanMessage(content=user_message),
+                AIMessage(content=assistant_message),
+            ]
+        }
+
+        try:
+            await self.agent.aupdate_state(config, values)
+            log_agent(
+                "Persisted external turn to memory",
+                {
+                    "session": session_id[:8],
+                    "user_len": len(user_message),
+                    "assistant_len": len(assistant_message),
+                },
+            )
+            return True
+        except Exception as e:
+            log_error("AGENT", f"Failed to persist external turn: {e}", e)
+            return False
+
     async def chat(self, message: str, session_id: Optional[str] = None) -> tuple[str, str]:
         """
         Process a user message and return response.
