@@ -1,76 +1,136 @@
 # Shopping AI Assistant V3
 
-Persian shopping assistant with FastAPI, LangGraph, MCP servers, Redis caching, and Elasticsearch search.
+Persian shopping assistant built with FastAPI, LangGraph, MCP servers, Redis caching, and Elasticsearch.
 
-## Quick Links
-- Documentation index: `docs/README.md`
-- English docs: `docs/en/`
-- Persian docs: `docs/fa/`
-- Backend API entry: `backend/main.py`
-- Agent core: `src/agent.py`
-- MCP servers: `src/mcp_servers/`
+## What This Project Does
+- Conversational Persian shopping assistant
+- Decides between normal chat, clarification, and product search
+- Uses tool-calling (`search_and_deliver`, `get_product_details`) for product results
+- Returns structured API responses for frontend rendering
+- Emits pipeline latency summaries for bottleneck analysis
 
-## Services
-- `frontend`: `${FRONTEND_HOST_PORT:-3000}`
-- `backend` (FastAPI gateway): `${BACKEND_HOST_PORT:-8080}`
-- `search` MCP server: `${MCP_SEARCH_HOST_PORT:-5002}`
-- `embedding` MCP server: `${MCP_EMBEDDING_HOST_PORT:-5003}`
-- `interpret` MCP server: `${MCP_INTERPRET_HOST_PORT:-5004}`
-- `redis`: `${REDIS_HOST_PORT:-6379}`
+## High-Level Architecture
+```mermaid
+flowchart LR
+  U[User] --> FE[Frontend React/Vite]
+  FE -->|POST /api/chat| BE[FastAPI Backend]
+  BE --> AS[AgentService]
+  AS --> AG[ShoppingAgent LangGraph]
 
-## Local Run
+  AG -->|MCP tools/call| INTP[Interpret MCP :5004]
+  AG -->|MCP tools/call| SRCH[Search MCP :5002]
+  SRCH --> EMB[Embedding MCP :5003]
+
+  AS <-->|L2 Cache| REDIS[(Redis)]
+  AG <-->|L3 Cache| REDIS
+  SRCH <-->|L1 + DSL + Negative Cache| REDIS
+  SRCH --> ES[(Elasticsearch)]
+```
+
+## Active Services
+- `frontend` -> `${FRONTEND_HOST_PORT:-3000}`
+- `backend` (FastAPI) -> `${BACKEND_HOST_PORT:-8080}`
+- `interpret` (MCP) -> `${MCP_INTERPRET_HOST_PORT:-5004}`
+- `search` (MCP) -> `${MCP_SEARCH_HOST_PORT:-5002}`
+- `embedding` (MCP) -> `${MCP_EMBEDDING_HOST_PORT:-5003}`
+- `redis` -> `${REDIS_HOST_PORT:-6379}`
+
+## Core Runtime Flow
+1. Frontend calls `POST /api/chat`.
+2. Backend `AgentService` checks L2 agent cache.
+3. On miss, `ShoppingAgent` runs ReAct and decides tool usage.
+4. For product search, agent calls `search_and_deliver` tool:
+   - interpret (`direct | unclear`)
+   - search (+ rerank)
+   - format results JSON block
+5. `AgentService` extracts products, cleans response text, returns structured API payload.
+6. Cache layers are updated when applicable.
+
+## Caching Layers
+- **L1 Search Cache** (search server): query/result cache + negative cache + DSL cache
+- **L2 Agent Cache** (`AgentService`): full API response cache for repeated direct queries
+- **L3 LLM Response Cache** (`src/agent.py`): cached final formatted LLM text keyed by search params
+
+## Quick Start (Local)
 ```bash
 cp .env.example .env
-python -m pip install -r requirements.txt
-python -m src.mcp_servers.run_servers
-python -m uvicorn backend.main:app --host 0.0.0.0 --port 8080 --reload
+python3 -m pip install -r requirements.txt
+python3 -m src.mcp_servers.run_servers
+python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8080 --reload
 ```
 
-## Docker Run
+## Quick Start (Docker)
 ```bash
-docker-compose up --build
+docker compose up --build
 ```
-
-If your server already uses common ports (e.g. `8080`, `6379`), override only host ports in `.env`:
-```env
-BACKEND_HOST_PORT=8081
-REDIS_HOST_PORT=6380
-FRONTEND_HOST_PORT=3001
-MCP_SEARCH_HOST_PORT=5005
-MCP_EMBEDDING_HOST_PORT=5006
-MCP_INTERPRET_HOST_PORT=5007
-```
-Internal service ports and project structure stay unchanged.
 
 Debug stack:
 ```bash
-docker-compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```
 
-## Logging
-- Structured service logs: `logs/shopping-assistant-backend.log` and `.error.log`
-- Pipeline logs (per service):
-  - `logs/pipeline-shopping-assistant-backend.log`
-  - `logs/pipeline-shopping-assistant-interpret.log`
-  - `logs/pipeline-shopping-assistant-search.log`
-  - `logs/pipeline-shopping-assistant-embedding.log`
+## Configuration Highlights
+- Agent model routing:
+  - `AGENT_MODEL_PROVIDER=openrouter|groq`
+  - `AGENT_MODEL=...`
+- Interpret/Search model (GitHub/OpenRouter override through env)
+- Redis/Elasticsearch endpoints
+- Pipeline logging controls:
+  - `DEBUG_LOG`
+  - `PIPELINE_LOG_TO_FILE`
+  - `PIPELINE_LOG_MAX_BYTES`
+  - `PIPELINE_LOG_BACKUP_COUNT`
 
-## Safety / Rollback
-Cleanup backups are stored under `_backup/`.
-If a removed file should be restored, use:
+See full config details in:
+- `docs/en/OPERATIONS.md`
+- `docs/fa/OPERATIONS.md`
+
+## Observability and Latency Analysis
+Pipeline logs are written under `logs/`:
+- `pipeline-shopping-assistant-backend.log`
+- `pipeline-shopping-assistant-interpret.log`
+- `pipeline-shopping-assistant-search.log`
+- `pipeline-shopping-assistant-embedding.log`
+
+Useful commands:
 ```bash
-bash scripts/restore_cleanup_backup.sh
+grep -h "LATENCY_SUMMARY" logs/pipeline-*.log
+python3 scripts/analyze_latency_logs.py --log-dir logs --top 30
+python3 scripts/analyze_latency_logs.py --log-dir logs --component agent.chat
+python3 scripts/analyze_latency_logs.py --log-dir logs --component interpret.pipeline
+python3 scripts/analyze_latency_logs.py --log-dir logs --component search.pipeline
 ```
 
-## Status Note
-Test suite has been replaced with a new architecture-aligned suite in `tests/`. Full final validation can be run later with:
+## Testing
 ```bash
 pytest -q
 ```
 
-Current quick validation (file-by-file) is green for:
-- `tests/test_agent_cache.py`
-- `tests/test_agent_service.py`
-- `tests/test_mcp_client.py`
-- `tests/test_pipeline_logger.py`
-- `tests/test_backend_api.py`
+Targeted quick checks:
+```bash
+pytest -q tests/test_agent_service.py tests/test_agent_cache.py tests/test_pipeline_logger.py
+```
+
+## Rollback
+If a deployment causes issues:
+```bash
+git revert <commit_sha>
+```
+
+For cleanup snapshots restored by script:
+```bash
+bash scripts/restore_cleanup_backup.sh
+```
+
+## Documentation Map
+- Index: `docs/README.md`
+- English:
+  - `docs/en/ARCHITECTURE.md`
+  - `docs/en/PIPELINES.md`
+  - `docs/en/API.md`
+  - `docs/en/OPERATIONS.md`
+- فارسی:
+  - `docs/fa/ARCHITECTURE.md`
+  - `docs/fa/PIPELINES.md`
+  - `docs/fa/API.md`
+  - `docs/fa/OPERATIONS.md`

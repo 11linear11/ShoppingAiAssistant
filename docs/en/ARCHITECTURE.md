@@ -1,104 +1,130 @@
 # Architecture (English)
 
-## 1. System Overview
-Shopping AI Assistant V3 is a multi-service architecture:
-- FastAPI gateway for frontend/API traffic
-- LangGraph agent orchestration
-- MCP servers for interpret/search/embedding responsibilities
-- Redis for caching
-- Elasticsearch for product retrieval
+## 1. System Context
+Shopping AI Assistant V3 is an **agent-first** architecture:
+- Frontend calls backend `/api/chat`
+- Backend delegates to `AgentService`
+- `ShoppingAgent` decides tool calls
+- MCP servers execute interpret/search/embedding responsibilities
+- Redis and Elasticsearch provide persistence and retrieval speed
 
 ```mermaid
 flowchart LR
-  FE[Frontend React] -->|POST /api/chat| BE[FastAPI Backend]
-  BE --> AG[ShoppingAgent LangGraph]
-  AG --> IC[MCP Client]
+  FE[Frontend] -->|HTTP| BE[FastAPI Backend]
+  BE --> AS[AgentService]
+  AS --> AG[ShoppingAgent\nLangGraph ReAct]
 
-  IC --> IS[Interpret Server :5004]
-  IC --> SS[Search Server :5002]
-  IC --> ES[Embedding Server :5003]
+  AG -->|tools/call| IC[MCPClient]
+  IC --> INTP[Interpret Server]
+  IC --> SRCH[Search Server]
+  SRCH --> EMB[Embedding Server]
 
-  SS --> REDIS[(Redis :6379)]
-  SS --> ELASTIC[(Elasticsearch)]
-  IS --> ES
+  AS <-->|L2 cache| REDIS[(Redis)]
+  AG <-->|L3 cache| REDIS
+  SRCH <-->|L1 + DSL + Negative cache| REDIS
+  SRCH --> ES[(Elasticsearch)]
 ```
 
 ## 2. Runtime Components
-### 2.1 Backend (`backend/`)
-- `backend/main.py`: app bootstrap, logging, lifespan
-- `backend/api/routes.py`: `/api/chat`, `/api/health`
-- `backend/services/agent_service.py`: response shaping + extraction + L2 cache orchestration
 
-### 2.2 Agent (`src/agent.py`)
-- Provider-selectable model (`AGENT_MODEL_PROVIDER`, `AGENT_MODEL`)
-- LangGraph ReAct workflow
-- Tool calls:
-  - `interpret_query`
-  - `search_products`
-  - `get_product_details`
-- L3 cache for full LLM-formatted responses keyed by search params
+| Layer | File(s) | Responsibility |
+|---|---|---|
+| API Gateway | `backend/main.py`, `backend/api/routes.py` | HTTP endpoints, lifespan, health check, CORS |
+| Service Wrapper | `backend/services/agent_service.py` | Agent init, timeout handling, L2 response cache, response normalization |
+| Agent | `src/agent.py` | LangGraph ReAct, tool orchestration, prompt policy, L3 formatted-response cache |
+| MCP Transport | `src/mcp_client.py` | Session-aware MCP `tools/call`, retries, SSE/JSON parsing |
+| Interpret MCP | `src/mcp_servers/interpret_server.py` | Query classification (`direct` / `unclear`) + extraction |
+| Search MCP | `src/mcp_servers/search_server.py` | DSL generation, ES search, rerank, category guard, caching |
+| Embedding MCP | `src/mcp_servers/embedding_server.py` | Embedding generation/similarity with in-memory cache |
+| Telemetry | `src/pipeline_logger.py` | Trace context, structured stage logs, `LATENCY_SUMMARY` events |
 
-### 2.3 MCP Layer
-- `src/mcp_client.py`: JSON-RPC over MCP streamable-http transport
-- `src/mcp_servers/interpret_server.py`: classify/extract query intent and parameters
-- `src/mcp_servers/search_server.py`: DSL generation, ES query, reranking, Redis-backed cache
-- `src/mcp_servers/embedding_server.py`: embedding generation and similarity tools
+## 3. Decision Topology (Current)
+The routing decision for product search is made by the **agent model** (prompt-driven), not by external deterministic router code.
 
-### 2.4 Logging
-- Service logs: `src/logging_config.py`
-- Pipeline logs: `src/pipeline_logger.py`
-- Per-service pipeline files via `PIPELINE_SERVICE_NAME`
-- Debug detail controlled by `DEBUG_LOG`
+- Agent modes in prompt: chat / clarify / search / details
+- Tool path for product retrieval:
+  - `search_and_deliver(query)` (return-direct tool)
+  - internally calls `interpret_query` then `search_products`
+- Interpret server currently coerces outcomes to:
+  - `direct`
+  - `unclear`
 
-## 3. Caching Strategy
-Three effective cache layers:
-- L1: Search cache inside search server (Redis, query-key based)
-- L2: Agent response cache in `AgentService` (`src/agent_cache.py`)
-- L3: LLM formatted response cache inside `src/agent.py`
-
+## 4. Data and Control Flow
 ```mermaid
-flowchart TD
-  Q[User Query] --> L2{Agent Cache HIT?}
-  L2 -->|Yes| R2[Return cached API response]
-  L2 -->|No| AG[LangGraph Agent]
-  AG --> T1[interpret_query]
-  T1 --> T2[search_products]
-  T2 --> L1{Search Cache HIT?}
-  L1 -->|Yes| D1[Return cached search data]
-  L1 -->|No| ESQ[Elasticsearch query + rerank]
-  D1 --> L3{LLM Response Cache HIT?}
-  ESQ --> L3
-  L3 -->|Yes| R3[Return cached final text]
-  L3 -->|No| GEN[LLM generate final response]
-  GEN --> STORE[Store L2/L3 caches]
-  STORE --> OUT[API response]
+sequenceDiagram
+  participant U as User
+  participant FE as Frontend
+  participant BE as Backend
+  participant AS as AgentService
+  participant AG as ShoppingAgent
+  participant IN as Interpret MCP
+  participant SE as Search MCP
+  participant RD as Redis
+  participant ES as Elasticsearch
+
+  U->>FE: message
+  FE->>BE: POST /api/chat
+  BE->>AS: chat()
+  AS->>RD: L2 cache lookup
+  alt L2 hit
+    AS-->>BE: cached API response
+  else L2 miss
+    AS->>AG: agent.chat()
+    AG->>IN: interpret_query (inside search_and_deliver)
+    alt query_type=direct
+      AG->>SE: search_products
+      SE->>RD: L1/search+negative+dsl cache
+      alt cache miss
+        SE->>ES: execute DSL
+        ES-->>SE: hits
+        SE->>SE: rerank
+      end
+      SE-->>AG: ranked products
+    else query_type=unclear
+      IN-->>AG: clarification payload
+    end
+    AG-->>AS: response text
+    AS->>AS: extract products + clean text + detect query_type
+    AS->>RD: optional L2 set
+    AS-->>BE: structured response
+  end
+  BE-->>FE: JSON
 ```
 
-## 4. Configuration Domains
-Key env categories:
-- Model selection: `AGENT_MODEL_PROVIDER`, `AGENT_MODEL`, provider-specific model keys
-- Service URLs: `MCP_INTERPRET_URL`, `MCP_SEARCH_URL`, `MCP_EMBEDDING_URL`
-- Data stores: `REDIS_*`, `ELASTICSEARCH_*`
-- Logging/observability: `DEBUG_LOG`, `PIPELINE_*`, `USE_LOGFIRE`
+## 5. Caching Architecture
 
-## 5. Deployment Topology
-### 5.1 Production
-`docker-compose.yml` runs all services with:
-- health checks
-- json-file rotation (`max-size`, `max-file`)
-- mounted `logs/` for pipeline files
+| Cache Layer | Location | Key Pattern | What is cached |
+|---|---|---|---|
+| L1 Search | `search_server` (Redis) | `cache:v2:search:*` | Ranked search results |
+| Negative Search | `search_server` (Redis) | `cache:v2:negative:*` | Known no-result query+intent pairs |
+| DSL Cache | `search_server` (Redis) | `cache:v1:dsl:*` | Generated DSL JSON |
+| L2 Agent Response | `AgentService` (Redis) | `cache:v1:agent:*` | Full API response payload |
+| L3 LLM Text | `src/agent.py` (Redis) | `cache:v1:llm_response:*` | Final formatted model answer text |
+| Interpret Embedding | `interpret_server` (Redis) | `cache:v1:embedding:*` | Query embedding vectors for category matching |
+| Embedding Service Cache | `embedding_server` (in-memory) | internal hash key | Embeddings inside embedding process memory |
 
-### 5.2 Development
-`docker-compose.dev.yml` overrides for:
-- hot reload
-- debug mode (`DEBUG_MODE=true`, `DEBUG_LOG=true`)
-- mounted source directories
+## 6. Search Quality Guards
+Implemented in `search_server`:
+- category normalization against known category map
+- prune DSL category filters if not in allowed categories
+- zero-hit retry without categories (single recovery attempt)
+- relevancy-aware rerank that penalizes late-position query matches
 
-## 6. Failure Handling Notes
-- MCP client retries initialization and session-expired 404 cases
-- Agent service handles timeout and exception fallbacks
-- Non-debug pipeline mode limits log volume to errors + user requests
+## 7. Session and Memory Semantics
+- Agent conversation memory: `MemorySaver` in `ShoppingAgent`
+- `thread_id` is mapped to API `session_id`
+- If invalid tool history error occurs, agent retries with new session id
 
-## 7. Removed Legacy Pieces
-Legacy cache server path (`:5007`) is no longer in active runtime flow.
-Search server directly uses Redis for cache operations.
+## 8. Reliability Model
+- MCP client retries initialization and transient transport/session issues
+- OpenRouter mode can fallback to Groq when tool-use endpoint is unavailable
+- API always returns safe response envelope; hard failures are converted to `success=false` with metadata error fields
+
+## 9. Observability Model
+- Standard service logs via `src/logging_config.py`
+- Pipeline logs via `src/pipeline_logger.py`
+- `LATENCY_SUMMARY` is emitted per major component (`agent.chat`, `agent_service.chat`, `interpret.pipeline`, `search.pipeline`, `mcp_client.call_tool`, ...)
+- Non-debug mode still keeps:
+  - user-request events
+  - latency summaries
+  - errors
