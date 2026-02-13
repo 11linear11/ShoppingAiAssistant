@@ -228,18 +228,6 @@ class AgentResponseCache:
             log_error("AGENT_CACHE", f"Cache set failed: {e}", e)
             return False
 
-    async def invalidate(self, query: str) -> bool:
-        """Remove a specific query from cache."""
-        if not self._redis:
-            return False
-
-        key = make_cache_key(query)
-        try:
-            await self._redis.delete(key)
-            return True
-        except Exception:
-            return False
-
     async def get_stats(self) -> dict:
         """Get cache statistics."""
         if not self._redis:

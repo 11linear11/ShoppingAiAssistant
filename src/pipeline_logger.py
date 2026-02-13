@@ -201,15 +201,6 @@ class TraceContext:
         
     def elapsed_ms(self) -> int:
         return int((time.time() - self.start_time) * 1000)
-    
-    def to_dict(self) -> dict:
-        return {
-            "trace_id": self.trace_id,
-            "query": self.query,
-            "session_id": self.session_id,
-            "total_ms": self.elapsed_ms(),
-            "stages": self.stages,
-        }
 
 
 # Context-local storage for trace context (safe for async concurrency)
