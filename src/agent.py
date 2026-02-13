@@ -93,7 +93,7 @@ _last_search_cache_key: Optional[str] = None  # Tracks current search key for po
 _llm_cache_hit: bool = False  # Flag: True when Level 3 cache was hit inside search_products
 _llm_cached_response: Optional[str] = None  # Holds the cached LLM response when Level 3 hits
 _active_session_id: ContextVar[str] = ContextVar("active_session_id", default="")
-_search_tool_calls: ContextVar[int] = ContextVar("search_tool_calls", default=0)
+_search_tool_call_counts: dict[str, int] = {}
 
 
 def _get_active_session_id() -> str:
@@ -332,8 +332,8 @@ async def search_and_deliver(query: str) -> str:
         current_trace = get_current_trace()
         trace_id = current_trace.trace_id if current_trace else None
         request_session_id = _get_active_session_id()
-        tool_calls = _search_tool_calls.get() + 1
-        _search_tool_calls.set(tool_calls)
+        tool_calls = _search_tool_call_counts.get(request_session_id, 0) + 1
+        _search_tool_call_counts[request_session_id] = tool_calls
 
         log_agent("search_and_deliver called", {
             "query": query,
@@ -775,7 +775,7 @@ class ShoppingAgent:
                 _last_search_cache_key = None
                 _llm_cache_hit = False
                 _llm_cached_response = None
-                search_tool_token = _search_tool_calls.set(0)
+                _search_tool_call_counts[session_id] = 0
 
                 log_agent("Processing message", {"session": session_id[:8], "message": message[:50]})
 
@@ -792,6 +792,13 @@ class ShoppingAgent:
 
                     if not response:
                         response = "متأسفانه نتونستم پاسخ مناسبی پیدا کنم. لطفاً دوباره سوالتون رو بپرسید."
+                    if "Sorry, need more steps to process this request." in response:
+                        response = (
+                            "برای رسیدن به نتیجه دقیق‌تر، لطفاً یکی از این موارد رو مشخص کنید:\n"
+                            "🛍️ نوع دقیق محصول\n"
+                            "💰 بازه بودجه\n"
+                            "🏷️ برند دلخواه"
+                        )
 
                     # ── Level 3 HIT: use the exact cached response instead of LLM output ──
                     if _llm_cache_hit and _llm_cached_response:
@@ -921,7 +928,7 @@ class ShoppingAgent:
                     )
                     return f"__AGENT_ERROR__:{str(e)}", session_id
                 finally:
-                    _search_tool_calls.reset(search_tool_token)
+                    _search_tool_call_counts.pop(session_id, None)
         finally:
             _active_session_id.reset(session_token)
 
