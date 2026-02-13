@@ -56,6 +56,9 @@ class Settings(BaseSettings):
 
     # Timeouts
     agent_timeout: int = Field(default=120, alias="AGENT_TIMEOUT")
+    direct_delivery_bypass_agent: bool = Field(
+        default=True, alias="DIRECT_DELIVERY_BYPASS_AGENT"
+    )
 
     class Config:
         env_file = ".env"

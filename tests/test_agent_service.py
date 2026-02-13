@@ -2,6 +2,7 @@ import asyncio
 from unittest.mock import AsyncMock
 
 from backend.services.agent_service import AgentService
+from backend.core.config import settings
 
 
 def _run(coro):
@@ -84,6 +85,49 @@ def test_chat_timeout_path():
     result = _run(service.chat("slow", timeout=0.001))
     assert result["success"] is False
     assert result["metadata"]["query_type"] == "timeout"
+
+
+def test_chat_direct_bypass_skips_agent_chat():
+    service = AgentService()
+    service._initialized = True
+    service._agent = AsyncMock()
+    service._interpret_client = object()
+    service._search_client = object()
+
+    service._cache = AsyncMock()
+    service._cache.available = False
+
+    direct_payload = {
+        "success": True,
+        "response": "این محصولات رو پیدا کردم",
+        "session_id": "sess-1",
+        "products": [
+            {
+                "id": "1",
+                "name": "کفش",
+                "brand": "X",
+                "price": 1000000,
+                "has_discount": False,
+                "discount_percentage": 0,
+                "discount_price": None,
+                "product_url": "",
+            }
+        ],
+        "metadata": {"query_type": "direct", "total_results": 1},
+    }
+    service._try_direct_delivery = AsyncMock(return_value=direct_payload)
+
+    old_flag = settings.direct_delivery_bypass_agent
+    settings.direct_delivery_bypass_agent = True
+    try:
+        result = _run(service.chat("کفش", session_id="sess-1"))
+    finally:
+        settings.direct_delivery_bypass_agent = old_flag
+
+    assert result["success"] is True
+    assert result["metadata"]["query_type"] == "direct"
+    assert len(result["products"]) == 1
+    assert service._agent.chat.await_count == 0
 
 
 def test_chat_agent_error_payload_contains_stage_and_type():
