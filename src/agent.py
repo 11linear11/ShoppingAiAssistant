@@ -340,13 +340,15 @@ def get_search_client() -> SearchMCPClient:
 @tool
 async def interpret_query(query: str) -> str:
     """
-    Interpret and analyze ANY user query that is not a simple greeting.
-    
-    MUST be called for ALL non-greeting messages, including:
-    - Direct product requests: "کفش ورزشی مردانه"
-    - Cheapest/best queries: "ارزان ترین شامپو"
-    - Abstract/vague requests: "خسته ام یه چیز خوب میخوام"
-    - Any message with shopping intent
+    Interpret and analyze a DIRECT, sufficiently-specified product request.
+
+    Call this tool only when the user intent is search-ready (direct).
+    Do NOT call for vague/abstract/gift-only/follow-up messages; ask clarification first.
+
+    Valid examples:
+    - "کفش ورزشی مردانه"
+    - "ارزان ترین شامپو"
+    - "شورت مردانه زیر 300 هزار"
     
     Args:
         query: The EXACT user message, passed as-is without modification
@@ -995,9 +997,11 @@ class ShoppingAgent:
     async def chat(self, message: str, session_id: Optional[str] = None) -> tuple[str, str]:
         """
         Process a user message and return response.
-        
+
         Flow:
-        1. LangGraph agent runs: LLM → interpret_query → search_products
+        1. LangGraph agent decides in-model:
+           - direct/search-ready: interpret_query → search_products
+           - abstract/follow-up/chat/unclear: conversation (no tools)
         2. Inside search_products: check LLM response cache (Level 3)
            If HIT → return cached LLM response as tool output (LLM passes it through)
            If MISS → return normal ES results, track cache key
