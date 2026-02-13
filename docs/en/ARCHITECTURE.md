@@ -30,7 +30,7 @@ flowchart LR
 - `backend/services/agent_service.py`: response shaping + extraction + L2 cache orchestration
 
 ### 2.2 Agent (`src/agent.py`)
-- Provider-selectable model (`AGENT_MODEL_PROVIDER`, `AGENT_MODEL`)
+- Provider-selectable model (`AGENT_MODEL_PROVIDER`, `AGENT_MODEL`, `AGENT_SECOND_MODEL`)
 - LangGraph ReAct workflow
 - Tool calls:
   - `interpret_query`
@@ -76,7 +76,7 @@ flowchart TD
 
 ## 4. Configuration Domains
 Key env categories:
-- Model selection: `AGENT_MODEL_PROVIDER`, `AGENT_MODEL`, provider-specific model keys
+- Model selection: `AGENT_MODEL_PROVIDER`, `AGENT_MODEL`, `AGENT_SECOND_MODEL`, provider-specific model keys
 - Service URLs: `MCP_INTERPRET_URL`, `MCP_SEARCH_URL`, `MCP_EMBEDDING_URL`
 - Data stores: `REDIS_*`, `ELASTICSEARCH_*`
 - Logging/observability: `DEBUG_LOG`, `PIPELINE_*`, `USE_LOGFIRE`

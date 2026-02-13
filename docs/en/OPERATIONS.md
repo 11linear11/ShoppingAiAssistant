@@ -5,8 +5,8 @@ Primary file: `.env`
 Template: `.env.example`
 
 Key variables:
-- Model selection: `AGENT_MODEL_PROVIDER`, `AGENT_MODEL`
-- Provider keys/models: `OPEN_ROUTERS_API_KEY`, `OPENROUTER_MODEL`, `GROQ_API_KEY`, `GROQ_MODEL`
+- Model selection: `AGENT_MODEL_PROVIDER`, `AGENT_MODEL`, `AGENT_SECOND_MODEL`
+- Provider keys/models: `OPEN_ROUTERS_API_KEY`, `OPENROUTER_MODEL`, `OPENROUTER_SECOND_MODEL`, `GROQ_API_KEY`, `GROQ_MODEL`, `GROQ_SECOND_MODEL`
 - MCP URLs: `MCP_INTERPRET_URL`, `MCP_SEARCH_URL`, `MCP_EMBEDDING_URL`
 - Data stores: `REDIS_*`, `ELASTICSEARCH_*`
 - Logging: `DEBUG_LOG`, `PIPELINE_*`, `USE_LOGFIRE`

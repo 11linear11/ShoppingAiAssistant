@@ -5,8 +5,8 @@
 
 ## هدف
 - حذف وابستگی مسیر `direct` به تصمیم آزاد tool-calling مدل
-- انتقال حالت‌های `abstract` و `follow_up` به مکالمه مستقیم Agent
-- نگه‌داشتن `interpret` به عنوان دروازه retrieval برای `direct/unclear`
+- انتقال حالت‌های `chat/abstract/follow_up/unclear` به مکالمه مستقیم Agent
+- نگه‌داشتن `interpret` به عنوان دروازه retrieval فقط برای `direct`
 - اضافه‌کردن کش برای category matching در سرویس `interpret`
 
 ## تغییرات پیاده‌سازی‌شده
@@ -18,9 +18,9 @@
   - `DETERMINISTIC_ROUTER_ENABLED=true`
 - فلو جدید:
   1. Agent ابتدا Route را تعیین می‌کند: `direct|abstract|follow_up|chat|unclear`
-  2. اگر Route = `abstract` یا `follow_up` یا `chat`:
+  2. اگر Route = `chat` یا `abstract` یا `follow_up` یا `unclear`:
      - Agent در حالت `chat_without_tools` پاسخ مکالمه‌ای می‌دهد.
-  3. اگر Route = `direct` یا `unclear`:
+  3. اگر Route = `direct`:
      - `interpret_query` با context `direct_unclear_only=true` صدا زده می‌شود.
      - اگر خروجی `interpret` برابر `direct + searchable=true` بود:
        - `search_products` به صورت **اجباری** اجرا می‌شود.
@@ -36,7 +36,9 @@
   - خروجی استاندارد Route برای orchestrator
   - شامل fast-check اولیه برای greeting / follow-up عددی
 - متد جدید `chat_without_tools(...)`:
-  - مکالمه Agent بدون tool-calling برای `abstract/follow_up/chat`
+  - مکالمه Agent بدون tool-calling برای `chat/abstract/follow_up/unclear`
+  - سیستم پرامپت slot-filling برای هدایت کاربر تا رسیدن به query مستقیم
+  - لاگ latency با متادیتای `model` برای عیب‌یابی مدل فعال
 
 ### 3) Coerce Mode در Interpret
 فایل: `src/mcp_servers/interpret_server.py`

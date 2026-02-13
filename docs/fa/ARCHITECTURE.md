@@ -30,7 +30,7 @@ flowchart LR
 - `backend/services/agent_service.py`: ساخت پاسخ نهایی، استخراج محصول، مدیریت کش سطح ۲
 
 ### ۲.۲ ایجنت (`src/agent.py`)
-- انتخاب مدل از محیط (`AGENT_MODEL_PROVIDER`, `AGENT_MODEL`)
+- انتخاب مدل از محیط (`AGENT_MODEL_PROVIDER`, `AGENT_MODEL`, `AGENT_SECOND_MODEL`)
 - اجرای ReAct روی LangGraph
 - ابزارها:
   - `interpret_query`
@@ -76,7 +76,7 @@ flowchart TD
 
 ## ۴) پیکربندی
 گروه متغیرهای مهم:
-- مدل: `AGENT_MODEL_PROVIDER`, `AGENT_MODEL`
+- مدل: `AGENT_MODEL_PROVIDER`, `AGENT_MODEL`, `AGENT_SECOND_MODEL`
 - آدرس سرویس‌ها: `MCP_INTERPRET_URL`, `MCP_SEARCH_URL`, `MCP_EMBEDDING_URL`
 - دیتااستورها: `REDIS_*`, `ELASTICSEARCH_*`
 - لاگ و مانیتورینگ: `DEBUG_LOG`, `PIPELINE_*`, `USE_LOGFIRE`

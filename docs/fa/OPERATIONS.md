@@ -5,8 +5,8 @@
 نمونه: `.env.example`
 
 متغیرهای کلیدی:
-- انتخاب مدل: `AGENT_MODEL_PROVIDER`, `AGENT_MODEL`
-- کلید/مدل ارائه‌دهنده: `OPEN_ROUTERS_API_KEY`, `OPENROUTER_MODEL`, `GROQ_API_KEY`, `GROQ_MODEL`
+- انتخاب مدل: `AGENT_MODEL_PROVIDER`, `AGENT_MODEL`, `AGENT_SECOND_MODEL`
+- کلید/مدل ارائه‌دهنده: `OPEN_ROUTERS_API_KEY`, `OPENROUTER_MODEL`, `OPENROUTER_SECOND_MODEL`, `GROQ_API_KEY`, `GROQ_MODEL`, `GROQ_SECOND_MODEL`
 - URL سرویس‌ها: `MCP_INTERPRET_URL`, `MCP_SEARCH_URL`, `MCP_EMBEDDING_URL`
 - دیتاستورها: `REDIS_*`, `ELASTICSEARCH_*`
 - لاگ/مانیتورینگ: `DEBUG_LOG`, `PIPELINE_*`, `USE_LOGFIRE`

@@ -42,15 +42,24 @@ class Settings(BaseSettings):
 
     agent_model_provider: str = Field(default="openrouter", alias="AGENT_MODEL_PROVIDER")
     agent_model: str = Field(default="", alias="AGENT_MODEL")
+    agent_second_model: str = Field(default="", alias="AGENT_SECOND_MODEL")
 
     openrouter_api_key: str = Field(default="", alias="OPEN_ROUTERS_API_KEY")
-    openrouter_model: str = Field(default="qwen/qwen2.5-vl-32b-instruct", alias="OPENROUTER_MODEL")
+    openrouter_model: str = Field(
+        default="meta-llama/llama-3.3-70b-instruct",
+        alias="OPENROUTER_MODEL",
+    )
+    openrouter_second_model: str = Field(
+        default="meta-llama/llama-3.3-70b-instruct",
+        alias="OPENROUTER_SECOND_MODEL",
+    )
     openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL")
     openrouter_provider_order: str = Field(default="", alias="OPENROUTER_PROVIDER_ORDER")
 
     # Groq fallback
     groq_api_key: str = Field(default="", alias="GROQ_API_KEY")
     groq_model: str = Field(default="llama-3.3-70b-versatile", alias="GROQ_MODEL")
+    groq_second_model: str = Field(default="llama-3.3-70b-versatile", alias="GROQ_SECOND_MODEL")
     groq_base_url: str = Field(default="https://api.groq.com/openai/v1", alias="GROQ_BASE_URL")
 
     interpret_url: str = Field(default="http://localhost:5004", alias="MCP_INTERPRET_URL")
@@ -304,19 +313,32 @@ Return JSON only:
 }
 
 Routing rules:
-- direct: user requests/finds a concrete product or applies constraints (price/brand/etc.)
-- abstract: user needs something but product is not clear (e.g. "یه چیز میخوام")
-- follow_up: references previous options (e.g. "اولی", "همون", "شماره 2")
+- direct: user asks for a concrete product OR gives enough constraints to run product search now
+- abstract: user needs something but product class is not clear yet (e.g. "یه چیز میخوام")
+- follow_up: references previous discussion/options (e.g. "اولی", "همون", "شماره 2")
 - chat: greeting/small talk/thanks
-- unclear: too short/ambiguous/noise
+- unclear: too short/ambiguous/noise, not enough to search
+
+Important:
+- Prefer abstract/follow_up/unclear over direct when product intent is not explicit yet.
+- Gift-like requests (e.g. "کادو", "هدیه", "یه چیزی برای دوستم") are usually abstract unless product type is clear.
+- Return only JSON, no extra text.
 """
 
 CHAT_ONLY_PROMPT = """You are a Persian shopping assistant in conversation mode.
 Rules:
 - Do not call tools.
+- Goal: guide the user from abstract/follow-up/unclear to a direct, searchable request.
 - Keep response concise and practical.
-- If user need is abstract, ask 1 clarifying question and optionally suggest up to 3 concrete product directions.
-- If follow-up, guide user to provide concrete product constraints if needed.
+- Ask only ONE clarifying question per turn.
+- Give up to 3 concrete options that help the user decide.
+- If user says gift/هدیه/کادو, prioritize these slots:
+  1) relationship/receiver
+  2) budget range
+  3) preferred product type/category
+  4) occasion (birthday, etc.) if relevant
+- If enough info exists, summarize user's need in one line and ask for confirmation.
+- Never invent products or prices.
 - Always answer in Persian.
 """
 
@@ -630,7 +652,7 @@ class ShoppingAgent:
     """
 
     @staticmethod
-    def _resolve_model_config() -> tuple[str, str, str, str]:
+    def _resolve_model_config(use_second_model: bool = False) -> tuple[str, str, str, str]:
         """
         Resolve LLM provider/model from environment settings.
 
@@ -642,16 +664,27 @@ class ShoppingAgent:
         if provider == "groq":
             api_key = settings.groq_api_key
             base_url = settings.groq_base_url
-            model = (settings.agent_model or settings.groq_model).strip()
+            primary_model = (settings.agent_model or settings.groq_model).strip()
+            second_default = (settings.groq_second_model or "").strip()
         elif provider in {"openrouter", "open_router"}:
             api_key = settings.openrouter_api_key
             base_url = settings.openrouter_base_url
-            model = (settings.agent_model or settings.openrouter_model).strip()
+            primary_model = (settings.agent_model or settings.openrouter_model).strip()
+            second_default = (settings.openrouter_second_model or "").strip()
             provider = "openrouter"
         else:
             raise ValueError(
                 "AGENT_MODEL_PROVIDER must be one of: openrouter, groq"
             )
+
+        if use_second_model:
+            model = (
+                settings.agent_second_model
+                or second_default
+                or primary_model
+            ).strip()
+        else:
+            model = primary_model
 
         if not model:
             raise ValueError("No model configured for selected AGENT_MODEL_PROVIDER")
@@ -687,11 +720,14 @@ class ShoppingAgent:
             providers.append(mapping.get(value.lower(), value))
         return providers
 
-    def __init__(self):
-        provider, api_key, base_url, model = self._resolve_model_config()
-        log_agent("Initializing ShoppingAgent", {"provider": provider, "model": model})
-
-        llm_kwargs = {
+    def _build_llm_kwargs(
+        self,
+        provider: str,
+        api_key: str,
+        base_url: str,
+        model: str,
+    ) -> dict[str, Any]:
+        llm_kwargs: dict[str, Any] = {
             "api_key": api_key,
             "base_url": base_url,
             "model": model,
@@ -706,10 +742,43 @@ class ShoppingAgent:
                     "provider": {"order": provider_order},
                 }
                 log_agent("OpenRouter provider routing enabled", {"order": provider_order})
+        return llm_kwargs
+
+    def __init__(self):
+        provider, api_key, base_url, model = self._resolve_model_config(use_second_model=False)
+        second_provider, second_api_key, second_base_url, second_model = self._resolve_model_config(
+            use_second_model=True
+        )
+        self.primary_model_name = model
+        self.second_model_name = second_model
+        log_agent(
+            "Initializing ShoppingAgent",
+            {
+                "provider": provider,
+                "model": model,
+                "second_model": second_model,
+            },
+        )
 
         self.llm = ChatOpenAI(
-            **llm_kwargs,
+            **self._build_llm_kwargs(provider, api_key, base_url, model),
         )
+        if (
+            second_provider == provider
+            and second_api_key == api_key
+            and second_base_url == base_url
+            and second_model == model
+        ):
+            self.second_llm = self.llm
+        else:
+            self.second_llm = ChatOpenAI(
+                **self._build_llm_kwargs(
+                    second_provider,
+                    second_api_key,
+                    second_base_url,
+                    second_model,
+                ),
+            )
         
         self.tools = [interpret_query, search_products, get_product_details]
         self.memory = MemorySaver()
@@ -736,32 +805,120 @@ class ShoppingAgent:
         except Exception:
             return {}
 
-    async def classify_route(self, message: str) -> dict[str, Any]:
+    async def classify_route(
+        self,
+        message: str,
+        conversation_context: str = "",
+    ) -> dict[str, Any]:
         """
         Classify query into deterministic orchestration route.
 
         Returns:
             {"route": "direct|abstract|follow_up|chat|unclear", "confidence": float, "reason": str}
         """
+        route_start = perf_counter()
         msg = (message or "").strip()
         if not msg:
-            return {"route": "unclear", "confidence": 1.0, "reason": "متن خالی است"}
+            result = {
+                "route": "unclear",
+                "confidence": 1.0,
+                "reason": "متن خالی است",
+                "source": "rule",
+            }
+            log_latency_summary(
+                "AGENT",
+                "agent.router.classify",
+                int((perf_counter() - route_start) * 1000),
+                meta={
+                    "route": result["route"],
+                    "confidence": result["confidence"],
+                    "source": result["source"],
+                    "success": True,
+                    "llm_role": "second",
+                    "model": self.second_model_name,
+                },
+            )
+            return result
 
         # Fast deterministic checks before LLM.
         if msg.isdigit():
-            return {"route": "follow_up", "confidence": 0.99, "reason": "انتخاب عددی"}
+            result = {
+                "route": "follow_up",
+                "confidence": 0.99,
+                "reason": "انتخاب عددی",
+                "source": "rule",
+            }
+            log_latency_summary(
+                "AGENT",
+                "agent.router.classify",
+                int((perf_counter() - route_start) * 1000),
+                meta={
+                    "route": result["route"],
+                    "confidence": result["confidence"],
+                    "source": result["source"],
+                    "success": True,
+                    "llm_role": "second",
+                    "model": self.second_model_name,
+                },
+            )
+            return result
         if re.fullmatch(r"\s*(اولی|دومی|سومی|همون|همین|این یکی|اون یکی|شماره\s*\d+)\s*", msg):
-            return {"route": "follow_up", "confidence": 0.95, "reason": "ارجاع به نتایج قبلی"}
+            result = {
+                "route": "follow_up",
+                "confidence": 0.95,
+                "reason": "ارجاع به نتایج قبلی",
+                "source": "rule",
+            }
+            log_latency_summary(
+                "AGENT",
+                "agent.router.classify",
+                int((perf_counter() - route_start) * 1000),
+                meta={
+                    "route": result["route"],
+                    "confidence": result["confidence"],
+                    "source": result["source"],
+                    "success": True,
+                    "llm_role": "second",
+                    "model": self.second_model_name,
+                },
+            )
+            return result
         if re.fullmatch(r"\s*(سلام|درود|خداحافظ|مرسی|ممنون|چطوری|خوبی)\s*[!؟?]*\s*", msg):
-            return {"route": "chat", "confidence": 0.95, "reason": "احوال‌پرسی/چت"}
+            result = {
+                "route": "chat",
+                "confidence": 0.95,
+                "reason": "احوال‌پرسی/چت",
+                "source": "rule",
+            }
+            log_latency_summary(
+                "AGENT",
+                "agent.router.classify",
+                int((perf_counter() - route_start) * 1000),
+                meta={
+                    "route": result["route"],
+                    "confidence": result["confidence"],
+                    "source": result["source"],
+                    "success": True,
+                    "llm_role": "second",
+                    "model": self.second_model_name,
+                },
+            )
+            return result
 
-        route_start = perf_counter()
         try:
-            response = await self.llm.ainvoke(
-                [
-                    SystemMessage(content=ROUTER_PROMPT),
-                    HumanMessage(content=msg),
-                ]
+            messages = [SystemMessage(content=ROUTER_PROMPT)]
+            if conversation_context.strip():
+                messages.append(
+                    SystemMessage(
+                        content=(
+                            "Conversation context (latest turns):\n"
+                            f"{conversation_context.strip()[:1200]}"
+                        )
+                    )
+                )
+            messages.append(HumanMessage(content=msg))
+            response = await self.second_llm.ainvoke(
+                messages
             )
             parsed = self._extract_json_object(str(response.content))
             route = str(parsed.get("route", "")).strip().lower()
@@ -776,12 +933,20 @@ class ShoppingAgent:
                 "route": route,
                 "confidence": max(0.0, min(1.0, confidence)),
                 "reason": str(parsed.get("reason", "")).strip()[:200],
+                "source": "llm",
             }
             log_latency_summary(
                 "AGENT",
                 "agent.router.classify",
                 int((perf_counter() - route_start) * 1000),
-                meta={"route": route, "success": True},
+                meta={
+                    "route": route,
+                    "confidence": result["confidence"],
+                    "source": result["source"],
+                    "success": True,
+                    "llm_role": "second",
+                    "model": self.second_model_name,
+                },
             )
             return result
         except Exception as e:
@@ -790,9 +955,21 @@ class ShoppingAgent:
                 "AGENT",
                 "agent.router.classify",
                 int((perf_counter() - route_start) * 1000),
-                meta={"route": "direct", "success": False},
+                meta={
+                    "route": "direct",
+                    "confidence": 0.5,
+                    "source": "fallback",
+                    "success": False,
+                    "llm_role": "second",
+                    "model": self.second_model_name,
+                },
             )
-            return {"route": "direct", "confidence": 0.5, "reason": "fallback"}
+            return {
+                "route": "direct",
+                "confidence": 0.5,
+                "reason": "fallback",
+                "source": "fallback",
+            }
 
     async def chat_without_tools(
         self,
@@ -812,7 +989,7 @@ class ShoppingAgent:
 
         chat_start = perf_counter()
         try:
-            response = await self.llm.ainvoke(
+            response = await self.second_llm.ainvoke(
                 [
                     SystemMessage(content=CHAT_ONLY_PROMPT),
                     HumanMessage(content=prompt),
@@ -825,7 +1002,12 @@ class ShoppingAgent:
                 "AGENT",
                 "agent.chat_without_tools",
                 int((perf_counter() - chat_start) * 1000),
-                meta={"success": True, "route_hint": route_hint or "none"},
+                meta={
+                    "success": True,
+                    "route_hint": route_hint or "none",
+                    "llm_role": "second",
+                    "model": self.second_model_name,
+                },
             )
             return text
         except Exception as e:
@@ -834,7 +1016,12 @@ class ShoppingAgent:
                 "AGENT",
                 "agent.chat_without_tools",
                 int((perf_counter() - chat_start) * 1000),
-                meta={"success": False, "route_hint": route_hint or "none"},
+                meta={
+                    "success": False,
+                    "route_hint": route_hint or "none",
+                    "llm_role": "second",
+                    "model": self.second_model_name,
+                },
             )
             return "متوجه شدم. لطفاً دقیق‌تر بگید دنبال چه محصولی هستید تا بهتر کمک کنم."
 

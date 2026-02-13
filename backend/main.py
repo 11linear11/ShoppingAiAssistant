@@ -36,8 +36,18 @@ logger = get_logger(__name__)
 AGENT_PROVIDER = os.environ.get("AGENT_MODEL_PROVIDER", "openrouter").strip().lower()
 if AGENT_PROVIDER == "groq":
     AGENT_MODEL = os.environ.get("AGENT_MODEL") or os.environ.get("GROQ_MODEL", "")
+    AGENT_SECOND_MODEL = (
+        os.environ.get("AGENT_SECOND_MODEL")
+        or os.environ.get("GROQ_SECOND_MODEL")
+        or AGENT_MODEL
+    )
 else:
     AGENT_MODEL = os.environ.get("AGENT_MODEL") or os.environ.get("OPENROUTER_MODEL", "")
+    AGENT_SECOND_MODEL = (
+        os.environ.get("AGENT_SECOND_MODEL")
+        or os.environ.get("OPENROUTER_SECOND_MODEL")
+        or AGENT_MODEL
+    )
 
 
 # =============================================================================
@@ -84,6 +94,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"Debug mode: {settings.debug}")
     logger.info(f"Agent provider: {AGENT_PROVIDER}")
     logger.info(f"Agent model: {AGENT_MODEL or 'not-set'}")
+    logger.info(f"Agent second model: {AGENT_SECOND_MODEL or 'not-set'}")
     
     # Initialize agent service
     agent_service = get_agent_service()

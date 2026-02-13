@@ -46,6 +46,9 @@ class AgentService:
         self._cache: Optional[AgentResponseCache] = None
         self._interpret_client: Optional[InterpretMCPClient] = None
         self._search_client: Optional[SearchMCPClient] = None
+        # Session-scoped lightweight memory for discovery dialogs.
+        self._conversation_memory: dict[str, list[dict[str, str]]] = {}
+        self._max_conversation_turns = 8
 
     async def initialize(self) -> None:
         """Initialize the agent and response cache (lazy loading)."""
@@ -81,6 +84,34 @@ class AgentService:
         if not self._initialized or self._agent is None:
             raise RuntimeError("Agent not initialized. Call initialize() first.")
         return self._agent
+
+    def _remember_turn(self, session_id: str, role: str, text: str) -> None:
+        if not session_id or role not in {"user", "assistant"}:
+            return
+        content = (text or "").strip()
+        if not content:
+            return
+        history = self._conversation_memory.setdefault(session_id, [])
+        history.append({"role": role, "text": content[:500]})
+        if len(history) > self._max_conversation_turns:
+            self._conversation_memory[session_id] = history[-self._max_conversation_turns :]
+
+    def _conversation_context(self, session_id: str, max_turns: int = 6) -> str:
+        history = self._conversation_memory.get(session_id, [])
+        if not history:
+            return ""
+        selected = history[-max_turns:]
+        lines: list[str] = []
+        for turn in selected:
+            role = "کاربر" if turn.get("role") == "user" else "دستیار"
+            text = (turn.get("text") or "").strip()
+            if text:
+                lines.append(f"{role}: {text}")
+        return "\n".join(lines)
+
+    def _clear_conversation(self, session_id: str) -> None:
+        if session_id in self._conversation_memory:
+            self._conversation_memory.pop(session_id, None)
 
     async def chat(
         self,
@@ -281,31 +312,54 @@ class AgentService:
     ) -> tuple[str, list[dict], str, dict[str, str], dict[str, int]]:
         """
         Deterministic orchestration:
-        - Agent routes: direct/unclear/abstract/follow_up/chat
+        - Agent routes: direct/abstract/follow_up/chat/unclear
         - direct + searchable => always call search (no tool-call skip risk)
-        - abstract/follow_up/chat => agent conversational mode (no tools)
+        - chat/abstract/follow_up/unclear => conversation mode until user reaches direct
         """
         timings: dict[str, int] = {}
         meta: dict[str, str] = {"orchestrator": "deterministic_v1"}
+        prior_context = self._conversation_context(session_id)
 
         route_start = perf_counter()
-        route_info = await self.agent.classify_route(message)
+        route_info = await self.agent.classify_route(
+            message,
+            conversation_context=prior_context,
+        )
         timings["router_classify_ms"] = int((perf_counter() - route_start) * 1000)
         route = str(route_info.get("route", "unclear")).strip().lower()
         if route not in {"direct", "abstract", "follow_up", "chat", "unclear"}:
             route = "unclear"
-        meta["route"] = route
+        route_conf = route_info.get("confidence", 0.0)
+        route_reason = str(route_info.get("reason", "")).strip()
+        route_source = str(route_info.get("source", "unknown")).strip()
 
-        if route in {"chat", "abstract", "follow_up"}:
+        try:
+            conf_val = max(0.0, min(1.0, float(route_conf)))
+        except Exception:
+            conf_val = 0.0
+
+        meta["route"] = route
+        meta["route_confidence"] = f"{conf_val:.3f}"
+        meta["route_source"] = route_source or "unknown"
+        if route_reason:
+            meta["route_reason"] = route_reason[:180]
+
+        self._remember_turn(session_id, "user", message)
+
+        if route in {"chat", "abstract", "follow_up", "unclear"}:
             conv_start = perf_counter()
+            conv_context = prior_context or ""
             response = await self.agent.chat_without_tools(
                 message,
                 route_hint=route,
+                extra_context=conv_context,
             )
             timings["router_conversation_ms"] = int((perf_counter() - conv_start) * 1000)
+            self._remember_turn(session_id, "assistant", response)
+            meta["search_executed"] = "false"
             return response, [], route, meta, timings
 
-        # Route says direct/unclear -> use interpret as retrieval gate (direct/unclear only).
+        # Route says direct -> use interpret as retrieval gate for search.
         if self._interpret_client is None or self._search_client is None:
             raise RuntimeError("Deterministic clients are not initialized")
 
@@ -341,19 +395,26 @@ class AgentService:
                 search_result=search_result,
             )
             meta["search_executed"] = "true"
+            # Discovery cycle is complete when a direct search executes.
+            self._clear_conversation(session_id)
             return response, products, "direct", meta, timings
 
         # Fallback path: unclear or non-direct result from interpret.
         fallback_text = self._build_clarification_from_interpret(interpret_result)
         if not fallback_text:
             conv_start = perf_counter()
+            extra_context = prior_context or ""
+            if extra_context:
+                extra_context += "\n"
+            extra_context += f"interpret_type={interpret_type}"
             fallback_text = await self.agent.chat_without_tools(
                 message,
                 route_hint="unclear",
-                extra_context=f"interpret_type={interpret_type}",
+                extra_context=extra_context,
             )
             timings["router_conversation_ms"] = int((perf_counter() - conv_start) * 1000)
 
+        self._remember_turn(session_id, "assistant", fallback_text)
         meta["search_executed"] = "false"
         return fallback_text, [], "unclear", meta, timings
 
