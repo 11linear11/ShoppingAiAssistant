@@ -183,19 +183,30 @@ class QueryInterpreter:
         """Initialize Redis connection for embedding cache."""
         if self._embedding_cache_redis is not None:
             return
-        # Try configured host first, then common Docker aliases as fallback.
-        host_candidates = [settings.redis_host]
+        # Try configured endpoint first, then common Docker fallbacks.
+        endpoint_candidates: list[tuple[str, int]] = [
+            (settings.redis_host, settings.redis_port),
+        ]
         if settings.redis_host != "host.docker.internal":
-            host_candidates.append("host.docker.internal")
+            endpoint_candidates.append(("host.docker.internal", settings.redis_port))
         if settings.redis_host != "redis":
-            host_candidates.append("redis")
+            endpoint_candidates.append(("redis", settings.redis_port))
+        # Compose-internal Redis almost always listens on 6379.
+        if settings.redis_port != 6379:
+            endpoint_candidates.append(("redis", 6379))
+
+        # Deduplicate while preserving order.
+        unique_endpoints: list[tuple[str, int]] = []
+        for endpoint in endpoint_candidates:
+            if endpoint not in unique_endpoints:
+                unique_endpoints.append(endpoint)
 
         last_error: Optional[Exception] = None
-        for host in host_candidates:
+        for host, port in unique_endpoints:
             try:
                 client = aioredis.Redis(
                     host=host,
-                    port=settings.redis_port,
+                    port=port,
                     password=settings.redis_password or None,
                     db=settings.redis_db,
                     decode_responses=True,
@@ -204,7 +215,7 @@ class QueryInterpreter:
                 self._embedding_cache_redis = client
                 log_interpret(
                     "Embedding cache connected to Redis",
-                    {"host": host, "port": settings.redis_port},
+                    {"host": host, "port": port},
                 )
                 return
             except Exception as e:
