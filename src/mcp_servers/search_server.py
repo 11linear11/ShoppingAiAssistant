@@ -87,6 +87,8 @@ class Settings(BaseSettings):
 
     # MCP service URLs
     embedding_url: str = Field(default="http://localhost:5003", alias="MCP_EMBEDDING_URL")
+    embedding_mcp_timeout: float = Field(default=15.0, alias="EMBEDDING_MCP_TIMEOUT")
+    embedding_mcp_retries: int = Field(default=2, alias="EMBEDDING_MCP_RETRIES")
 
     # Redis settings (direct connection for caching)
     redis_host: str = Field(default="localhost", alias="REDIS_HOST")
@@ -721,31 +723,45 @@ class SearchEngine:
 
     async def _get_embedding(self, text: str) -> Optional[list[float]]:
         """Get embedding for text via the embedding MCP server."""
-        try:
-            resp = await self.http_client.post(
-                f"{settings.embedding_url}/mcp",
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "generate_embedding",
-                        "arguments": {"text": text, "normalize": True, "use_cache": True}
-                    }
-                },
-                headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
-                timeout=5.0,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                if "result" in data:
-                    content = data["result"].get("content", [])
-                    for item in content:
-                        if item.get("type") == "text":
-                            result = json.loads(item["text"])
-                            return result.get("embedding")
-        except Exception as e:
-            log_error("SEARCH", f"Embedding fetch failed: {e}", e)
+        attempts = max(1, int(settings.embedding_mcp_retries))
+        for attempt in range(1, attempts + 1):
+            try:
+                resp = await self.http_client.post(
+                    f"{settings.embedding_url}/mcp",
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "generate_embedding",
+                            "arguments": {"text": text, "normalize": True, "use_cache": True}
+                        }
+                    },
+                    headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
+                    timeout=settings.embedding_mcp_timeout,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if "result" in data:
+                        content = data["result"].get("content", [])
+                        for item in content:
+                            if item.get("type") == "text":
+                                result = json.loads(item["text"])
+                                embedding = result.get("embedding")
+                                if embedding:
+                                    return embedding
+            except Exception as e:
+                if attempt < attempts:
+                    log_search(
+                        "Embedding fetch retry",
+                        {
+                            "attempt": attempt,
+                            "max_attempts": attempts,
+                            "error_type": e.__class__.__name__,
+                        },
+                    )
+                else:
+                    log_error("SEARCH", f"Embedding fetch failed: {e}", e)
         return None
 
     def _generate_fallback_dsl(self, search_params: dict[str, Any]) -> dict:
