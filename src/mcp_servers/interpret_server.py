@@ -9,6 +9,7 @@ This is the MCP protocol version using FastMCP SDK.
 """
 
 import asyncio
+import hashlib
 import json
 import re
 import sys
@@ -70,6 +71,22 @@ class Settings(BaseSettings):
     embedding_model: str = Field(
         default="intfloat/multilingual-e5-base",
         alias="EMBEDDING_MODEL",
+    )
+    category_match_threshold: float = Field(
+        default=0.75,
+        alias="CATEGORY_MATCH_THRESHOLD",
+    )
+    category_match_cache_enabled: bool = Field(
+        default=True,
+        alias="CATEGORY_MATCH_CACHE_ENABLED",
+    )
+    category_match_cache_ttl: int = Field(
+        default=86400,
+        alias="CATEGORY_MATCH_CACHE_TTL",
+    )
+    category_match_cache_max_entries: int = Field(
+        default=5000,
+        alias="CATEGORY_MATCH_CACHE_MAX_ENTRIES",
     )
 
     # Debug mode - disables caching
@@ -161,6 +178,8 @@ class QueryInterpreter:
         self.llm = llm
         self._category_embeddings: dict[str, list[float]] = {}
         self._category_names: list[str] = []
+        self._category_cache: dict[str, tuple[float, list[str]]] = {}
+        self._category_embeddings_version: str = "na"
         
         # Local embedding model for category matching
         log_interpret("Loading embedding model", {"model": settings.embedding_model})
@@ -177,6 +196,8 @@ class QueryInterpreter:
         try:
             project_root = Path(__file__).parent.parent.parent
             file_path = project_root / filepath
+            raw_bytes = file_path.read_bytes()
+            self._category_embeddings_version = hashlib.sha1(raw_bytes).hexdigest()[:12]
 
             with open(file_path, "r", encoding="utf-8") as f:
                 self._category_embeddings = json.load(f)
@@ -184,7 +205,11 @@ class QueryInterpreter:
             self._category_names = list(self._category_embeddings.keys())
             log_interpret(
                 "Category embeddings loaded from file",
-                {"count": len(self._category_names), "file": str(file_path)},
+                {
+                    "count": len(self._category_names),
+                    "file": str(file_path),
+                    "version": self._category_embeddings_version,
+                },
             )
             log_interpret(
                 "Category embeddings loaded", {"count": len(self._category_names)}
@@ -261,6 +286,14 @@ class QueryInterpreter:
 
         # Process based on type
         query_type_str = llm_result.get("query_type", "direct")
+        if context.get("direct_unclear_only") and query_type_str in {"abstract", "follow_up"}:
+            # In deterministic orchestrator mode, interpret acts as retrieval gate:
+            # only direct is actionable; all other routed intents become unclear fallback.
+            log_interpret(
+                "Coercing non-direct query type to unclear (direct_unclear_only mode)",
+                {"original_query_type": query_type_str},
+            )
+            query_type_str = "unclear"
         log_interpret(
             f"Query type: {query_type_str}",
             {"reasoning": llm_result.get("reasoning", "")[:100]},
@@ -553,6 +586,43 @@ If a product name is mentioned, it's DIRECT - not ABSTRACT.
             },
         }
 
+    def _make_category_cache_key(self, product: str) -> str:
+        normalized = self._normalize_persian(product).lower()
+        threshold = f"{settings.category_match_threshold:.3f}"
+        return (
+            f"{settings.embedding_model}|{self._category_embeddings_version}|"
+            f"{threshold}|{normalized}"
+        )
+
+    def _category_cache_get(self, key: str) -> Optional[list[str]]:
+        if not settings.category_match_cache_enabled:
+            return None
+        entry = self._category_cache.get(key)
+        if not entry:
+            return None
+        ts, categories = entry
+        age_seconds = perf_counter() - ts
+        if age_seconds > settings.category_match_cache_ttl:
+            self._category_cache.pop(key, None)
+            return None
+        return list(categories)
+
+    def _category_cache_set(self, key: str, categories: list[str]) -> None:
+        if not settings.category_match_cache_enabled:
+            return
+        self._category_cache[key] = (perf_counter(), list(categories))
+        max_entries = max(int(settings.category_match_cache_max_entries), 100)
+        if len(self._category_cache) <= max_entries:
+            return
+        # Drop oldest ~10% entries to keep O(1) writes with bounded memory.
+        drop_count = max(1, max_entries // 10)
+        oldest_keys = sorted(
+            self._category_cache.items(),
+            key=lambda kv: kv[1][0],
+        )[:drop_count]
+        for old_key, _ in oldest_keys:
+            self._category_cache.pop(old_key, None)
+
     async def _match_categories(self, product: str) -> list[str]:
         """Match product to categories using embedding similarity."""
         if not self._category_embeddings:
@@ -560,6 +630,15 @@ If a product name is mentioned, it's DIRECT - not ABSTRACT.
             return []
 
         try:
+            cache_key = self._make_category_cache_key(product)
+            cached = self._category_cache_get(cache_key)
+            if cached is not None:
+                log_interpret(
+                    "Category match cache HIT",
+                    {"product": product, "categories": cached},
+                )
+                return cached
+
             # Generate embedding using local model (with E5 prefix)
             prefixed_text = f"query: {product}"
             product_embedding = self._embedding_model.encode(
@@ -584,7 +663,7 @@ If a product name is mentioned, it's DIRECT - not ABSTRACT.
                 "top_matches": [(cat, round(sim, 4)) for cat, sim in top_5]
             })
 
-            threshold = 0.75
+            threshold = settings.category_match_threshold
             matched = [cat for cat, sim in similarities if sim >= threshold]
             
             if not matched:
@@ -592,8 +671,10 @@ If a product name is mentioned, it's DIRECT - not ABSTRACT.
                     "threshold": threshold,
                     "best_match": top_5[0] if top_5 else None
                 })
-            
-            return matched[:5]
+
+            final_categories = matched[:5]
+            self._category_cache_set(cache_key, final_categories)
+            return final_categories
 
         except Exception as e:
             log_interpret("Category matching error", {"error": str(e)})

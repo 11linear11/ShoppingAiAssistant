@@ -7,12 +7,13 @@ The LLM decides which tools to use based on user queries.
 
 import asyncio
 import json
+import re
 import uuid
 from time import perf_counter
 from contextvars import ContextVar
-from typing import Optional
+from typing import Any, Optional
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
@@ -292,6 +293,31 @@ If search_products returns a response starting with "✅ CACHED_RESPONSE:", that
 ## Response Language:
 - ALWAYS respond in Persian (Farsi)
 - Use emojis to make responses friendly
+"""
+
+ROUTER_PROMPT = """You are a strict router for Persian shopping queries.
+Return JSON only:
+{
+  "route": "direct|abstract|follow_up|chat|unclear",
+  "confidence": 0.0,
+  "reason": "short Persian reason"
+}
+
+Routing rules:
+- direct: user requests/finds a concrete product or applies constraints (price/brand/etc.)
+- abstract: user needs something but product is not clear (e.g. "یه چیز میخوام")
+- follow_up: references previous options (e.g. "اولی", "همون", "شماره 2")
+- chat: greeting/small talk/thanks
+- unclear: too short/ambiguous/noise
+"""
+
+CHAT_ONLY_PROMPT = """You are a Persian shopping assistant in conversation mode.
+Rules:
+- Do not call tools.
+- Keep response concise and practical.
+- If user need is abstract, ask 1 clarifying question and optionally suggest up to 3 concrete product directions.
+- If follow-up, guide user to provide concrete product constraints if needed.
+- Always answer in Persian.
 """
 
 # ============================================================================
@@ -696,6 +722,121 @@ class ShoppingAgent:
         )
         
         log_agent("ShoppingAgent initialized", {"tools": [t.name for t in self.tools]})
+
+    @staticmethod
+    def _extract_json_object(text: str) -> dict[str, Any]:
+        content = (text or "").strip()
+        if not content:
+            return {}
+        match = re.search(r"\{[\s\S]*\}", content)
+        if not match:
+            return {}
+        try:
+            return json.loads(match.group(0))
+        except Exception:
+            return {}
+
+    async def classify_route(self, message: str) -> dict[str, Any]:
+        """
+        Classify query into deterministic orchestration route.
+
+        Returns:
+            {"route": "direct|abstract|follow_up|chat|unclear", "confidence": float, "reason": str}
+        """
+        msg = (message or "").strip()
+        if not msg:
+            return {"route": "unclear", "confidence": 1.0, "reason": "متن خالی است"}
+
+        # Fast deterministic checks before LLM.
+        if msg.isdigit():
+            return {"route": "follow_up", "confidence": 0.99, "reason": "انتخاب عددی"}
+        if re.fullmatch(r"\s*(اولی|دومی|سومی|همون|همین|این یکی|اون یکی|شماره\s*\d+)\s*", msg):
+            return {"route": "follow_up", "confidence": 0.95, "reason": "ارجاع به نتایج قبلی"}
+        if re.fullmatch(r"\s*(سلام|درود|خداحافظ|مرسی|ممنون|چطوری|خوبی)\s*[!؟?]*\s*", msg):
+            return {"route": "chat", "confidence": 0.95, "reason": "احوال‌پرسی/چت"}
+
+        route_start = perf_counter()
+        try:
+            response = await self.llm.ainvoke(
+                [
+                    SystemMessage(content=ROUTER_PROMPT),
+                    HumanMessage(content=msg),
+                ]
+            )
+            parsed = self._extract_json_object(str(response.content))
+            route = str(parsed.get("route", "")).strip().lower()
+            if route not in {"direct", "abstract", "follow_up", "chat", "unclear"}:
+                route = "direct"
+            confidence = parsed.get("confidence", 0.7)
+            try:
+                confidence = float(confidence)
+            except Exception:
+                confidence = 0.7
+            result = {
+                "route": route,
+                "confidence": max(0.0, min(1.0, confidence)),
+                "reason": str(parsed.get("reason", "")).strip()[:200],
+            }
+            log_latency_summary(
+                "AGENT",
+                "agent.router.classify",
+                int((perf_counter() - route_start) * 1000),
+                meta={"route": route, "success": True},
+            )
+            return result
+        except Exception as e:
+            log_error("AGENT", f"Route classification failed: {e}", e)
+            log_latency_summary(
+                "AGENT",
+                "agent.router.classify",
+                int((perf_counter() - route_start) * 1000),
+                meta={"route": "direct", "success": False},
+            )
+            return {"route": "direct", "confidence": 0.5, "reason": "fallback"}
+
+    async def chat_without_tools(
+        self,
+        message: str,
+        route_hint: str = "",
+        extra_context: str = "",
+    ) -> str:
+        """
+        Conversation mode without tool calling.
+        Used for abstract/follow_up/chat flows in deterministic orchestrator.
+        """
+        prompt = message
+        if route_hint:
+            prompt = f"route_hint={route_hint}\nuser_message={message}"
+        if extra_context:
+            prompt += f"\nextra_context={extra_context}"
+
+        chat_start = perf_counter()
+        try:
+            response = await self.llm.ainvoke(
+                [
+                    SystemMessage(content=CHAT_ONLY_PROMPT),
+                    HumanMessage(content=prompt),
+                ]
+            )
+            text = str(response.content or "").strip()
+            if not text:
+                text = "لطفاً کمی دقیق‌تر بگید دنبال چه محصولی هستید."
+            log_latency_summary(
+                "AGENT",
+                "agent.chat_without_tools",
+                int((perf_counter() - chat_start) * 1000),
+                meta={"success": True, "route_hint": route_hint or "none"},
+            )
+            return text
+        except Exception as e:
+            log_error("AGENT", f"chat_without_tools failed: {e}", e)
+            log_latency_summary(
+                "AGENT",
+                "agent.chat_without_tools",
+                int((perf_counter() - chat_start) * 1000),
+                meta={"success": False, "route_hint": route_hint or "none"},
+            )
+            return "متوجه شدم. لطفاً دقیق‌تر بگید دنبال چه محصولی هستید تا بهتر کمک کنم."
 
     async def chat(self, message: str, session_id: Optional[str] = None) -> tuple[str, str]:
         """

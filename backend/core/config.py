@@ -56,6 +56,16 @@ class Settings(BaseSettings):
 
     # Timeouts
     agent_timeout: int = Field(default=120, alias="AGENT_TIMEOUT")
+    interpret_mcp_timeout: float = Field(default=10.0, alias="INTERPRET_MCP_TIMEOUT")
+    search_mcp_timeout: float = Field(default=60.0, alias="SEARCH_MCP_TIMEOUT")
+
+    # Deterministic orchestration flags
+    deterministic_router_enabled: bool = Field(
+        default=False, alias="DETERMINISTIC_ROUTER_ENABLED"
+    )
+    deterministic_force_search: bool = Field(
+        default=True, alias="DETERMINISTIC_FORCE_SEARCH"
+    )
 
     class Config:
         env_file = ".env"

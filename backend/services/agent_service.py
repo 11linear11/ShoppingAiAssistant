@@ -25,6 +25,7 @@ from src.agent import ShoppingAgent
 from src.agent_cache import AgentResponseCache
 from src.logging_config import get_logger
 from src.pipeline_logger import log_latency_summary
+from src.mcp_client import InterpretMCPClient, SearchMCPClient
 from backend.api.schemas import ProductInfo, ChatMetadata
 from backend.core.config import settings
 
@@ -43,6 +44,8 @@ class AgentService:
         self._agent: Optional[ShoppingAgent] = None
         self._initialized = False
         self._cache: Optional[AgentResponseCache] = None
+        self._interpret_client: Optional[InterpretMCPClient] = None
+        self._search_client: Optional[SearchMCPClient] = None
 
     async def initialize(self) -> None:
         """Initialize the agent and response cache (lazy loading)."""
@@ -62,6 +65,15 @@ class AgentService:
                 await self._cache.connect()
             else:
                 logger.info("Agent response cache is disabled")
+
+            self._interpret_client = InterpretMCPClient(
+                settings.mcp_interpret_url,
+                timeout=settings.interpret_mcp_timeout,
+            )
+            self._search_client = SearchMCPClient(
+                settings.mcp_search_url,
+                timeout=settings.search_mcp_timeout,
+            )
 
     @property
     def agent(self) -> ShoppingAgent:
@@ -130,30 +142,39 @@ class AgentService:
         
         # ── Cache miss → full pipeline ─────────────────────────────
         try:
-            # Call agent with timeout
             stage_start = perf_counter()
-            response, session_id = await asyncio.wait_for(
-                self.agent.chat(message, session_id),
-                timeout=timeout,
-            )
+            route_meta: dict[str, str] = {}
+            if settings.deterministic_router_enabled:
+                response, products, query_type, route_meta, det_timings = await asyncio.wait_for(
+                    self._chat_deterministic(message, session_id),
+                    timeout=timeout,
+                )
+                timings.update(det_timings)
+                clean_response = response
+                timings["extract_products_ms"] = 0
+                timings["clean_response_ms"] = 0
+                timings["detect_query_type_ms"] = 0
+            else:
+                response, session_id = await asyncio.wait_for(
+                    self.agent.chat(message, session_id),
+                    timeout=timeout,
+                )
+                # Extract products from response (if any)
+                parse_start = perf_counter()
+                products = self._extract_products(response)
+                timings["extract_products_ms"] = int((perf_counter() - parse_start) * 1000)
+                
+                # Clean response text (remove product details if extracted)
+                clean_start = perf_counter()
+                clean_response = self._clean_response_text(response, products)
+                timings["clean_response_ms"] = int((perf_counter() - clean_start) * 1000)
+                
+                # Determine query type
+                detect_start = perf_counter()
+                query_type = self._detect_query_type(response, products)
+                timings["detect_query_type_ms"] = int((perf_counter() - detect_start) * 1000)
             timings["agent_chat_ms"] = int((perf_counter() - stage_start) * 1000)
-            
             took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
-            
-            # Extract products from response (if any)
-            stage_start = perf_counter()
-            products = self._extract_products(response)
-            timings["extract_products_ms"] = int((perf_counter() - stage_start) * 1000)
-            
-            # Clean response text (remove product details if extracted)
-            stage_start = perf_counter()
-            clean_response = self._clean_response_text(response, products)
-            timings["clean_response_ms"] = int((perf_counter() - stage_start) * 1000)
-            
-            # Determine query type
-            stage_start = perf_counter()
-            query_type = self._detect_query_type(response, products)
-            timings["detect_query_type_ms"] = int((perf_counter() - stage_start) * 1000)
             
             result = {
                 "success": True,
@@ -201,6 +222,7 @@ class AgentService:
                     "query_type": query_type,
                     "success": True,
                     "products": len(products),
+                    **route_meta,
                 },
             )
             
@@ -251,6 +273,201 @@ class AgentService:
                 },
                 "error": str(e),
             }
+
+    async def _chat_deterministic(
+        self,
+        message: str,
+        session_id: str,
+    ) -> tuple[str, list[dict], str, dict[str, str], dict[str, int]]:
+        """
+        Deterministic orchestration:
+        - Agent routes: direct/unclear/abstract/follow_up/chat
+        - direct + searchable => always call search (no tool-call skip risk)
+        - abstract/follow_up/chat => agent conversational mode (no tools)
+        """
+        timings: dict[str, int] = {}
+        meta: dict[str, str] = {"orchestrator": "deterministic_v1"}
+
+        route_start = perf_counter()
+        route_info = await self.agent.classify_route(message)
+        timings["router_classify_ms"] = int((perf_counter() - route_start) * 1000)
+        route = str(route_info.get("route", "unclear")).strip().lower()
+        if route not in {"direct", "abstract", "follow_up", "chat", "unclear"}:
+            route = "unclear"
+        meta["route"] = route
+
+        if route in {"chat", "abstract", "follow_up"}:
+            conv_start = perf_counter()
+            response = await self.agent.chat_without_tools(
+                message,
+                route_hint=route,
+            )
+            timings["router_conversation_ms"] = int((perf_counter() - conv_start) * 1000)
+            return response, [], route, meta, timings
+
+        # Route says direct/unclear -> use interpret as retrieval gate (direct/unclear only).
+        if self._interpret_client is None or self._search_client is None:
+            raise RuntimeError("Deterministic clients are not initialized")
+
+        interpret_start = perf_counter()
+        interpret_result = await self._interpret_client.interpret_query(
+            query=message,
+            session_id=session_id,
+            context={"direct_unclear_only": True},
+        )
+        timings["router_interpret_ms"] = int((perf_counter() - interpret_start) * 1000)
+
+        interpret_type = str(interpret_result.get("query_type", "unclear")).strip().lower()
+        searchable = bool(interpret_result.get("searchable"))
+        meta["interpret_type"] = interpret_type
+
+        if interpret_type == "direct" and searchable and settings.deterministic_force_search:
+            search_params = self._build_search_params_from_interpret(
+                interpret_result.get("search_params", {}),
+                original_message=message,
+            )
+
+            search_start = perf_counter()
+            search_result = await self._search_client.search_products(
+                search_params=search_params,
+                session_id=session_id,
+                use_cache=True,
+            )
+            timings["router_search_ms"] = int((perf_counter() - search_start) * 1000)
+
+            products = self._products_from_search_result(search_result)
+            response = self._build_search_response_text(
+                products=products,
+                search_result=search_result,
+            )
+            meta["search_executed"] = "true"
+            return response, products, "direct", meta, timings
+
+        # Fallback path: unclear or non-direct result from interpret.
+        fallback_text = self._build_clarification_from_interpret(interpret_result)
+        if not fallback_text:
+            conv_start = perf_counter()
+            fallback_text = await self.agent.chat_without_tools(
+                message,
+                route_hint="unclear",
+                extra_context=f"interpret_type={interpret_type}",
+            )
+            timings["router_conversation_ms"] = int((perf_counter() - conv_start) * 1000)
+
+        meta["search_executed"] = "false"
+        return fallback_text, [], "unclear", meta, timings
+
+    @staticmethod
+    def _as_positive_int(value) -> Optional[int]:
+        try:
+            if value is None:
+                return None
+            iv = int(float(value))
+            return iv if iv > 0 else None
+        except Exception:
+            return None
+
+    def _build_search_params_from_interpret(
+        self,
+        search_params: dict,
+        original_message: str,
+    ) -> dict:
+        product = str(search_params.get("product") or "").strip() or original_message.strip()
+        intent = str(search_params.get("intent") or "browse").strip().lower()
+        if intent not in {"browse", "find_cheapest", "find_best", "compare"}:
+            intent = "browse"
+
+        payload = {
+            "product": product,
+            "intent": intent,
+            "persian_full_query": str(search_params.get("persian_full_query") or original_message).strip(),
+        }
+
+        brand = str(search_params.get("brand") or "").strip()
+        if brand:
+            payload["brand"] = brand
+
+        categories = search_params.get("categories_fa")
+        if isinstance(categories, list):
+            cleaned = [str(c).strip() for c in categories if str(c).strip()]
+            if cleaned:
+                payload["categories_fa"] = cleaned[:5]
+
+        price_range = search_params.get("price_range") if isinstance(search_params.get("price_range"), dict) else {}
+        min_price = self._as_positive_int(price_range.get("min"))
+        max_price = self._as_positive_int(price_range.get("max"))
+        if min_price is not None or max_price is not None:
+            payload["price_range"] = {}
+            if min_price is not None:
+                payload["price_range"]["min"] = min_price
+            if max_price is not None:
+                payload["price_range"]["max"] = max_price
+
+        attributes = search_params.get("attributes")
+        if isinstance(attributes, dict) and attributes:
+            payload["attributes"] = attributes
+
+        return payload
+
+    def _products_from_search_result(self, search_result: dict) -> list[dict]:
+        rows = search_result.get("results", []) if isinstance(search_result, dict) else []
+        if not isinstance(rows, list):
+            rows = []
+
+        products: list[dict] = []
+        for i, item in enumerate(rows):
+            if not isinstance(item, dict):
+                continue
+            normalized = self._normalize_product(
+                {
+                    "name": item.get("product_name", item.get("name", "")),
+                    "brand": item.get("brand_name", item.get("brand", "")),
+                    "price": item.get("price", 0),
+                    "discount_price": item.get("discount_price"),
+                    "has_discount": item.get("has_discount", False),
+                    "discount_percentage": item.get("discount_percentage", 0),
+                    "product_url": item.get("product_url", item.get("url", "")),
+                },
+                i,
+            )
+            if normalized:
+                normalized["image_url"] = item.get("image_url")
+                products.append(normalized)
+        return products
+
+    @staticmethod
+    def _build_search_response_text(products: list[dict], search_result: dict) -> str:
+        if not products:
+            return "متأسفانه محصول مورد نظر شما یافت نشد. می‌تونید با کلمات دقیق‌تر دوباره جستجو کنید."
+        total_hits = int(search_result.get("total_hits", len(products))) if isinstance(search_result, dict) else len(products)
+        if total_hits > len(products):
+            return "این محصولات رو پیدا کردم"
+        return "این محصولات رو پیدا کردم"
+
+    @staticmethod
+    def _build_clarification_from_interpret(interpret_result: dict) -> str:
+        clarification = interpret_result.get("clarification")
+        if not isinstance(clarification, dict):
+            return ""
+        question = str(clarification.get("question") or "").strip()
+        suggestions = clarification.get("suggestions")
+        if not isinstance(suggestions, list) or not suggestions:
+            return question
+
+        suggestion_lines: list[str] = []
+        for idx, item in enumerate(suggestions[:4], 1):
+            if isinstance(item, dict):
+                title = str(item.get("product") or item.get("search_query") or "").strip()
+            else:
+                title = str(item).strip()
+            if title:
+                suggestion_lines.append(f"{idx}. {title}")
+
+        if suggestion_lines and question:
+            return f"{question}\n" + "\n".join(suggestion_lines)
+        if suggestion_lines:
+            return "برای اینکه بهتر کمک کنم یکی از گزینه‌های زیر رو انتخاب کنید:\n" + "\n".join(suggestion_lines)
+        return question
 
     def _normalize_json_text(self, text: str) -> str:
         """
