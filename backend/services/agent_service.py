@@ -174,36 +174,30 @@ class AgentService:
         # ── Cache miss → full pipeline ─────────────────────────────
         try:
             stage_start = perf_counter()
-            route_meta: dict[str, str] = {}
-            if settings.deterministic_router_enabled:
-                response, products, query_type, route_meta, det_timings = await asyncio.wait_for(
-                    self._chat_deterministic(message, session_id),
-                    timeout=timeout,
-                )
-                timings.update(det_timings)
-                clean_response = response
-                timings["extract_products_ms"] = 0
-                timings["clean_response_ms"] = 0
-                timings["detect_query_type_ms"] = 0
-            else:
-                response, session_id = await asyncio.wait_for(
-                    self.agent.chat(message, session_id),
-                    timeout=timeout,
-                )
-                # Extract products from response (if any)
-                parse_start = perf_counter()
-                products = self._extract_products(response)
-                timings["extract_products_ms"] = int((perf_counter() - parse_start) * 1000)
-                
-                # Clean response text (remove product details if extracted)
-                clean_start = perf_counter()
-                clean_response = self._clean_response_text(response, products)
-                timings["clean_response_ms"] = int((perf_counter() - clean_start) * 1000)
-                
-                # Determine query type
-                detect_start = perf_counter()
-                query_type = self._detect_query_type(response, products)
-                timings["detect_query_type_ms"] = int((perf_counter() - detect_start) * 1000)
+            # Agent-first orchestration:
+            # single decision path inside model prompt (no deterministic router stage).
+            route_meta: dict[str, str] = {
+                "orchestrator": "agent_react_v2",
+                "routing": "in_model",
+            }
+            response, session_id = await asyncio.wait_for(
+                self.agent.chat(message, session_id),
+                timeout=timeout,
+            )
+            # Extract products from response (if any)
+            parse_start = perf_counter()
+            products = self._extract_products(response)
+            timings["extract_products_ms"] = int((perf_counter() - parse_start) * 1000)
+
+            # Clean response text (remove product details if extracted)
+            clean_start = perf_counter()
+            clean_response = self._clean_response_text(response, products)
+            timings["clean_response_ms"] = int((perf_counter() - clean_start) * 1000)
+
+            # Determine query type
+            detect_start = perf_counter()
+            query_type = self._detect_query_type(response, products)
+            timings["detect_query_type_ms"] = int((perf_counter() - detect_start) * 1000)
             timings["agent_chat_ms"] = int((perf_counter() - stage_start) * 1000)
             took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
             
