@@ -183,22 +183,36 @@ class QueryInterpreter:
         """Initialize Redis connection for embedding cache."""
         if self._embedding_cache_redis is not None:
             return
-        try:
-            self._embedding_cache_redis = aioredis.Redis(
-                host=settings.redis_host,
-                port=settings.redis_port,
-                password=settings.redis_password or None,
-                db=settings.redis_db,
-                decode_responses=True,
-            )
-            await self._embedding_cache_redis.ping()
-            log_interpret("Embedding cache connected to Redis", {
-                "host": settings.redis_host,
-                "port": settings.redis_port,
-            })
-        except Exception as e:
-            log_error("INTERPRET", f"Embedding cache Redis connection failed: {e}", e)
-            self._embedding_cache_redis = None
+        # Try configured host first, then common Docker aliases as fallback.
+        host_candidates = [settings.redis_host]
+        if settings.redis_host != "host.docker.internal":
+            host_candidates.append("host.docker.internal")
+        if settings.redis_host != "redis":
+            host_candidates.append("redis")
+
+        last_error: Optional[Exception] = None
+        for host in host_candidates:
+            try:
+                client = aioredis.Redis(
+                    host=host,
+                    port=settings.redis_port,
+                    password=settings.redis_password or None,
+                    db=settings.redis_db,
+                    decode_responses=True,
+                )
+                await client.ping()
+                self._embedding_cache_redis = client
+                log_interpret(
+                    "Embedding cache connected to Redis",
+                    {"host": host, "port": settings.redis_port},
+                )
+                return
+            except Exception as e:
+                last_error = e
+                continue
+
+        log_error("INTERPRET", f"Embedding cache Redis connection failed: {last_error}", last_error)
+        self._embedding_cache_redis = None
 
     def _make_embedding_cache_key(self, text: str) -> str:
         """Build a Redis key for embedding cache."""

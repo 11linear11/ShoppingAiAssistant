@@ -112,6 +112,8 @@ services:
     environment:
       DEBUG_MODE: "false"
       HF_HOME: /root/.cache/huggingface
+      REDIS_HOST: "host.docker.internal"
+      REDIS_PORT: "${REDIS_HOST_PORT:-6379}"
       # Force interpret LLM traffic through OpenRouter while keeping a Llama model.
       GITHUB_TOKEN: "${OPEN_ROUTERS_API_KEY}"
       GITHUB_BASE_URL: "${INTERPRET_OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}"
@@ -124,6 +126,8 @@ services:
       - huggingface_cache:/root/.cache/huggingface
       - ./src:/app/src
       - ./logs:/app/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       app-network:
         aliases:
