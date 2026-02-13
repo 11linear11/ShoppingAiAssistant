@@ -399,6 +399,9 @@ class SearchEngine:
         self.http_client = httpx.AsyncClient(timeout=settings.search_timeout)
         self._brand_scores: dict[str, float] = {}
         self._redis: Optional[aioredis.Redis] = None
+        self._known_categories_map = {
+            self._normalize_text(cat): cat for cat in KNOWN_CATEGORIES
+        }
 
     async def init_redis(self):
         """Initialize direct Redis connection for caching."""
@@ -441,6 +444,16 @@ class SearchEngine:
         """Execute full search pipeline."""
         pipeline_start = perf_counter()
         timings: dict[str, int] = {}
+        search_params = dict(search_params or {})
+
+        original_categories = search_params.get("categories_fa", []) or []
+        guarded_categories = self._sanitize_categories(original_categories)
+        if original_categories and guarded_categories != original_categories:
+            log_search(
+                "Category guard adjusted incoming categories",
+                {"original": original_categories, "kept": guarded_categories},
+            )
+        search_params["categories_fa"] = guarded_categories
 
         if settings.debug_mode:
             use_cache = False
@@ -547,6 +560,23 @@ class SearchEngine:
             raw_results = await self._execute_search(dsl)
             timings["es_search_ms"] = int((perf_counter() - stage_start) * 1000)
 
+            # Protective guard: if category filters over-constrain to zero hits,
+            # retry once without category filters.
+            if not raw_results and search_params.get("categories_fa"):
+                stage_start = perf_counter()
+                relaxed_params = dict(search_params)
+                relaxed_params["categories_fa"] = []
+                relaxed_dsl = await self.generate_dsl(relaxed_params)
+                raw_results = await self._execute_search(relaxed_dsl)
+                timings["category_guard_retry_ms"] = int((perf_counter() - stage_start) * 1000)
+                log_search(
+                    "Category guard fallback search executed",
+                    {
+                        "original_categories": search_params.get("categories_fa", []),
+                        "recovered_hits": len(raw_results),
+                    },
+                )
+
             if not raw_results:
                 if use_cache:
                     stage_start = perf_counter()
@@ -616,6 +646,11 @@ class SearchEngine:
         2. If Mixtral fails or times out, fallback to rule-based DSL
         3. If DSL contains embedding placeholder, inject real vector
         """
+        search_params = dict(search_params or {})
+        search_params["categories_fa"] = self._sanitize_categories(
+            search_params.get("categories_fa", []) or []
+        )
+
         # ── Try Mixtral first ──
         mixtral_start = perf_counter()
         mixtral_dsl = await self.mixtral_dsl.generate(search_params)
@@ -642,12 +677,19 @@ class SearchEngine:
             
             # Clean up any remaining internal markers
             mixtral_dsl.pop("_embedding_query", None)
-            return mixtral_dsl
+            return self._prune_dsl_category_filters(
+                mixtral_dsl,
+                search_params.get("categories_fa", []),
+            )
 
         log_search("Mixtral DSL failed/timed out, using fallback", {"mixtral_ms": mixtral_ms})
 
         # ── Fallback: rule-based DSL ──
-        return self._generate_fallback_dsl(search_params)
+        fallback_dsl = self._generate_fallback_dsl(search_params)
+        return self._prune_dsl_category_filters(
+            fallback_dsl,
+            search_params.get("categories_fa", []),
+        )
 
     async def _get_embedding(self, text: str) -> Optional[list[float]]:
         """Get embedding for text via the embedding MCP server."""
@@ -683,7 +725,7 @@ class SearchEngine:
         search_query = search_params.get("product") or search_params.get("persian_full_query", "")
         intent = search_params.get("intent", "browse")
         brand = search_params.get("brand")
-        categories = search_params.get("categories_fa", [])
+        categories = self._sanitize_categories(search_params.get("categories_fa", []) or [])
         constraints = search_params.get("constraints", {})
         fallback_price_range = search_params.get("price_range", {})
         price_range = constraints.get("price_range") or fallback_price_range or {}
@@ -971,6 +1013,94 @@ class SearchEngine:
         normalized = normalized.replace("ي", "ی").replace("ك", "ک")
         normalized = re.sub(r"\s+", " ", normalized)
         return normalized
+
+    def _sanitize_categories(self, categories: list[Any]) -> list[str]:
+        """Keep only known/valid categories and canonicalize their labels."""
+        cleaned: list[str] = []
+        removed: list[str] = []
+        seen: set[str] = set()
+
+        for category in categories or []:
+            raw = str(category or "").strip()
+            if not raw:
+                continue
+            normalized = self._normalize_text(raw)
+            canonical = self._known_categories_map.get(normalized)
+            if not canonical:
+                removed.append(raw)
+                continue
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            cleaned.append(canonical)
+
+        if removed:
+            log_search("Category guard removed unknown categories", {"removed": removed[:10]})
+
+        return cleaned
+
+    @classmethod
+    def _extract_category_values_from_filter(cls, node: Any) -> list[str]:
+        """Extract category filter values from any nested DSL fragment."""
+        found: list[str] = []
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in {"category_name", "category_name.keyword"}:
+                    if isinstance(value, str):
+                        found.append(value)
+                    elif isinstance(value, list):
+                        found.extend([str(v) for v in value if str(v).strip()])
+                else:
+                    found.extend(cls._extract_category_values_from_filter(value))
+        elif isinstance(node, list):
+            for item in node:
+                found.extend(cls._extract_category_values_from_filter(item))
+        return found
+
+    def _prune_dsl_category_filters(self, dsl: dict, allowed_categories: list[str]) -> dict:
+        """
+        Remove category filters from DSL when they are not in allowed categories.
+        This is a hard guard in code (not just prompt reliance).
+        """
+        if not isinstance(dsl, dict):
+            return dsl
+
+        bool_query = dsl.get("query", {}).get("bool", {})
+        filters = bool_query.get("filter")
+        if not isinstance(filters, list):
+            return dsl
+
+        allowed = {self._normalize_text(c) for c in (allowed_categories or []) if str(c).strip()}
+        kept_filters = []
+        removed_count = 0
+
+        for f in filters:
+            category_values = self._extract_category_values_from_filter(f)
+            if not category_values:
+                kept_filters.append(f)
+                continue
+
+            normalized_values = {
+                self._normalize_text(v) for v in category_values if str(v).strip()
+            }
+            if allowed and normalized_values.intersection(allowed):
+                kept_filters.append(f)
+            else:
+                removed_count += 1
+
+        if removed_count:
+            dsl = dict(dsl)
+            dsl_query = dict(dsl.get("query", {}))
+            dsl_bool = dict(dsl_query.get("bool", {}))
+            dsl_bool["filter"] = kept_filters
+            dsl_query["bool"] = dsl_bool
+            dsl["query"] = dsl_query
+            log_search(
+                "Category guard pruned DSL filters",
+                {"removed_filters": removed_count, "allowed_categories": allowed_categories},
+            )
+
+        return dsl
 
     def _build_cache_lookup_keys(
         self,

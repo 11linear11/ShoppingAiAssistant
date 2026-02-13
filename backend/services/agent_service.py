@@ -140,13 +140,30 @@ class AgentService:
 
             if isinstance(response, str) and response.startswith("__AGENT_ERROR__:"):
                 error_text = response.replace("__AGENT_ERROR__:", "", 1).strip()
+                error_stage = "agent.chat"
+                error_type = "AgentError"
+                error_message = error_text
+                try:
+                    parsed_error = json.loads(error_text)
+                    if isinstance(parsed_error, dict):
+                        error_stage = str(parsed_error.get("stage") or error_stage)
+                        error_type = str(parsed_error.get("error_type") or error_type)
+                        error_message = str(parsed_error.get("message") or error_text)
+                except Exception:
+                    pass
                 took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
                 log_latency_summary(
                     "AGENT",
                     "agent_service.chat",
                     int((perf_counter() - request_start) * 1000),
                     breakdown_ms=timings,
-                    meta={"cache": "miss", "query_type": "error", "success": False},
+                    meta={
+                        "cache": "miss",
+                        "query_type": "error",
+                        "success": False,
+                        "error_stage": error_stage,
+                        "error_type": error_type,
+                    },
                 )
                 return {
                     "success": False,
@@ -158,9 +175,11 @@ class AgentService:
                         "query_type": "error",
                         "total_results": 0,
                         "from_agent_cache": False,
+                        "error_stage": error_stage,
+                        "error_type": error_type,
                         "latency_breakdown_ms": timings,
                     },
-                    "error": error_text,
+                    "error": error_message,
                 }
             
             took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
@@ -194,16 +213,9 @@ class AgentService:
                 },
             }
             
-            # ── Store in agent cache (only direct product searches) ──────
-            # Skip caching for: suggestions, clarifications, greetings, errors
-            is_cacheable = (
-                products
-                and query_type == "direct"
-                and not any(
-                    kw in clean_response
-                    for kw in ["پیشنهاد", "انتخاب کنید", "کدوم", "کدام", "منظورتون"]
-                )
-            )
+            # ── Store in agent cache (only real product-result responses) ──────
+            # Keep this rule simple and data-driven (no keyword heuristics).
+            is_cacheable = bool(products) and query_type == "direct"
             if self._cache and self._cache.available and is_cacheable:
                 stage_start = perf_counter()
                 await self._cache.set(message, result)
@@ -255,12 +267,20 @@ class AgentService:
             }
         except Exception as e:
             took_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            error_stage = "agent_service.chat"
+            error_type = e.__class__.__name__
             log_latency_summary(
                 "AGENT",
                 "agent_service.chat",
                 int((perf_counter() - request_start) * 1000),
                 breakdown_ms=timings,
-                meta={"cache": "miss", "query_type": "error", "success": False},
+                meta={
+                    "cache": "miss",
+                    "query_type": "error",
+                    "success": False,
+                    "error_stage": error_stage,
+                    "error_type": error_type,
+                },
             )
             return {
                 "success": False,
@@ -272,6 +292,8 @@ class AgentService:
                     "query_type": "error",
                     "total_results": 0,
                     "from_agent_cache": False,
+                    "error_stage": error_stage,
+                    "error_type": error_type,
                     "latency_breakdown_ms": timings,
                 },
                 "error": str(e),
@@ -482,22 +504,19 @@ class AgentService:
         return clean
     
     def _detect_query_type(self, response: str, products: list) -> str:
-        """Detect the type of query based on response."""
-        # Check for greeting indicators
-        greeting_indicators = ["سلام", "👋", "کمک", "خدمت", "😊", "😄"]
-        if any(ind in response for ind in greeting_indicators) and not products:
-            return "chat"
-        
-        # Check for product search indicators
-        product_indicators = ["📦", "💰", "تومان", "قیمت", "برند"]
-        if any(ind in response for ind in product_indicators):
+        """Detect the type of query based on structured output, not keywords."""
+        if products:
             return "direct"
-        
-        # Check for no results
-        no_result_indicators = ["یافت نشد", "پیدا نشد", "متأسفانه"]
-        if any(ind in response for ind in no_result_indicators):
+
+        text = (response or "").strip()
+        if text.startswith("❓ NEED_CLARIFICATION:"):
+            return "unclear"
+        if text.startswith("❌ NO_RESULTS:"):
             return "no_results"
-        
+        if text.startswith("__AGENT_ERROR__:"):
+            return "error"
+        if text:
+            return "chat"
         return "unknown"
 
     async def health_check(self) -> dict:

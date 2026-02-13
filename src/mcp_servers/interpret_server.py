@@ -297,19 +297,6 @@ class QueryInterpreter:
                 },
             )
 
-        # Quick check: a bare number is not search-ready here.
-        if normalized.strip().isdigit():
-            log_interpret("Detected bare numeric query -> unclear", {"number": normalized})
-            response = self._build_unclear_response({
-                "suggested_products": [],
-                "reasoning": "numeric_only",
-            })
-            _log_summary(
-                query_type=response.get("query_type", "unclear"),
-                searchable=bool(response.get("searchable")),
-            )
-            return response
-
         # LLM Classification + Extraction
         llm_start = perf_counter()
         with trace_stage("INTERPRET", "LLM Classification"):
@@ -400,29 +387,46 @@ class QueryInterpreter:
         return None
 
     def _repair_classification(self, llm_result: dict) -> dict:
-        out = dict(llm_result or {})
-        out["query_type"] = self._coerce_query_type(out.get("query_type"))
+        raw = dict(llm_result or {})
+        out: dict[str, Any] = {}
+        out["query_type"] = self._coerce_query_type(raw.get("query_type"))
 
         # Intent normalization
-        intent = str(out.get("intent") or "").strip().lower()
+        intent = str(raw.get("intent") or "").strip().lower()
         if intent not in {"browse", "find_cheapest", "find_best", "compare"}:
             intent = "browse"
         out["intent"] = intent
 
-        # Price range normalization (model-provided only)
-        price_range = out.get("price_range") if isinstance(out.get("price_range"), dict) else {}
+        # Price range normalization (model-provided only, no text post-process)
+        raw_price_range = raw.get("price_range") if isinstance(raw.get("price_range"), dict) else {}
         price_range = {
-            "min": self._safe_int(price_range.get("min")),
-            "max": self._safe_int(price_range.get("max")),
+            "min": self._safe_int(raw_price_range.get("min")),
+            "max": self._safe_int(raw_price_range.get("max")),
         }
+        if (
+            price_range.get("min") is not None
+            and price_range.get("max") is not None
+            and price_range["min"] > price_range["max"]
+        ):
+            price_range["min"], price_range["max"] = price_range["max"], price_range["min"]
         out["price_range"] = price_range
 
-        out["product"] = str(out.get("product") or "").strip()
-        brand = str(out.get("brand") or "").strip()
+        product = str(raw.get("product") or "").strip()
+        brand = str(raw.get("brand") or "").strip()
+        out["product"] = product or None
         out["brand"] = brand or None
 
-        if out["query_type"] == "direct" and not out.get("product"):
+        confidence_raw = raw.get("confidence", 0.0)
+        try:
+            confidence = float(confidence_raw)
+        except Exception:
+            confidence = 0.0
+        out["confidence"] = max(0.0, min(1.0, confidence))
+
+        if out["query_type"] == "direct" and not out["product"]:
             out["query_type"] = "unclear"
+        if out["query_type"] == "unclear":
+            out["product"] = None
 
         return out
 
@@ -468,16 +472,14 @@ Examples:
 - find_best: wants best quality/value (بهترین)
 - compare: wants to compare options
 
-Return JSON only:
+Return JSON only with EXACTLY these keys:
 {{
     "query_type": "direct|unclear",
-    "confidence": 0.0-1.0,
-    "reasoning": "short explanation in Persian",
-    "product": "required when direct, else null",
-    "brand": "brand name or null",
-    "price_range": {{"min": null, "max": null}},
+    "product": "string or null",
+    "brand": "string or null",
+    "price_range": {{"min": null|number, "max": null|number}},
     "intent": "browse|find_cheapest|find_best|compare",
-    "suggested_products": ["suggestion1", "suggestion2", "suggestion3"]
+    "confidence": 0.0-1.0,
 }}
 
 Return only valid JSON."""
@@ -485,7 +487,8 @@ Return only valid JSON."""
         system_prompt = """You are a strict shopping query analyzer.
 Always return only valid JSON.
 Return only direct or unclear.
-If brand/price exists in query, extract it."""
+Return exactly these keys and no extra fields:
+query_type, product, brand, price_range, intent, confidence."""
 
         try:
             response = await self.llm.generate(
@@ -526,7 +529,6 @@ If brand/price exists in query, extract it."""
                 "brand": repaired.get("brand"),
                 "persian_full_query": query,
                 "categories_fa": categories,
-                "attributes": repaired.get("attributes", {}),
                 "price_range": repaired.get("price_range", {}),
             },
             "session_update": {
@@ -538,13 +540,16 @@ If brand/price exists in query, extract it."""
     def _build_unclear_response(self, llm_result: dict) -> dict[str, Any]:
         """Build response for UNCLEAR queries."""
 
-        raw_suggestions = llm_result.get("suggested_products", []) if isinstance(llm_result, dict) else []
+        suggestions_seed = [
+            "گوشی موبایل",
+            "کفش مردانه",
+            "عطر و ادکلن",
+            "کیف زنانه",
+            "هدفون بی سیم",
+        ]
         suggestions = []
         emojis = ["🛒", "🎁", "📱", "👟", "👕"]
-        for i, item in enumerate(raw_suggestions[:5], 1):
-            name = str(item or "").strip()
-            if not name:
-                continue
+        for i, name in enumerate(suggestions_seed, 1):
             suggestions.append({
                 "id": i,
                 "product": name,

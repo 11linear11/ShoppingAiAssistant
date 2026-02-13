@@ -37,9 +37,8 @@ def test_extract_products_from_raw_array_and_detect_types():
     assert len(products) == 1
 
     query_type = service._detect_query_type(response, products)
-    # Current heuristic marks this as unknown because no direct indicators
-    # (like قیمت/تومان emoji markers) exist in the free-text prefix.
-    assert query_type == "unknown"
+    # Detection is now data-driven: if products exist, treat as direct.
+    assert query_type == "direct"
 
 
 def test_chat_returns_cached_result_when_agent_cache_hits():
@@ -85,6 +84,28 @@ def test_chat_timeout_path():
     result = _run(service.chat("slow", timeout=0.001))
     assert result["success"] is False
     assert result["metadata"]["query_type"] == "timeout"
+
+
+def test_chat_agent_error_payload_contains_stage_and_type():
+    service = AgentService()
+    service._initialized = True
+
+    async def failing_chat(message, session_id):
+        return (
+            '__AGENT_ERROR__:{"stage":"agent.chat","error_type":"RuntimeError","message":"boom"}',
+            session_id,
+        )
+
+    service._agent = AsyncMock()
+    service._agent.chat = failing_chat
+    service._cache = AsyncMock()
+    service._cache.available = False
+
+    result = _run(service.chat("test"))
+    assert result["success"] is False
+    assert result["metadata"]["query_type"] == "error"
+    assert result["metadata"]["error_stage"] == "agent.chat"
+    assert result["metadata"]["error_type"] == "RuntimeError"
 
 
 def test_chat_success_path_extracts_products_and_metadata():

@@ -56,7 +56,7 @@ class ChatMetadata(BaseModel):
 
     took_ms: int = Field(..., description="Processing time in milliseconds")
     query_type: Optional[str] = Field(
-        None, description="Type of query (direct/abstract/chat)"
+        None, description="Type of query (direct/unclear/chat/no_results/error)"
     )
     total_results: Optional[int] = Field(
         None, description="Total number of products found"
@@ -72,6 +72,12 @@ class ChatMetadata(BaseModel):
     )
     latency_breakdown_ms: Optional[dict[str, int]] = Field(
         None, description="Per-stage latency breakdown in milliseconds"
+    )
+    error_stage: Optional[str] = Field(
+        None, description="Pipeline stage where the error happened"
+    )
+    error_type: Optional[str] = Field(
+        None, description="Error class/type"
     )
 
 

@@ -926,7 +926,12 @@ class ShoppingAgent:
                         breakdown_ms=timings,
                         meta={"success": False},
                     )
-                    return f"__AGENT_ERROR__:{str(e)}", session_id
+                    error_payload = {
+                        "stage": "agent.chat",
+                        "error_type": e.__class__.__name__,
+                        "message": str(e),
+                    }
+                    return f"__AGENT_ERROR__:{json.dumps(error_payload, ensure_ascii=False)}", session_id
                 finally:
                     _search_tool_call_counts.pop(session_id, None)
         finally:
