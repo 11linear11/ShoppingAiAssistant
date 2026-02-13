@@ -44,6 +44,7 @@ from src.pipeline_logger import (
     set_current_trace,
     trace_stage,
 )
+from src.mcp_client import EmbeddingMCPClient
 
 # Load .env
 from dotenv import load_dotenv
@@ -401,6 +402,7 @@ class SearchEngine:
         self.http_client = httpx.AsyncClient(timeout=settings.search_timeout)
         self._brand_scores: dict[str, float] = {}
         self._redis: Optional[aioredis.Redis] = None
+        self._embedding_client: Optional[EmbeddingMCPClient] = None
         self._known_categories_map = {
             self._normalize_text(cat): cat for cat in KNOWN_CATEGORIES
         }
@@ -723,33 +725,26 @@ class SearchEngine:
 
     async def _get_embedding(self, text: str) -> Optional[list[float]]:
         """Get embedding for text via the embedding MCP server."""
+        if self._embedding_client is None:
+            self._embedding_client = EmbeddingMCPClient(
+                settings.embedding_url,
+                timeout=settings.embedding_mcp_timeout,
+            )
+
         attempts = max(1, int(settings.embedding_mcp_retries))
         for attempt in range(1, attempts + 1):
             try:
-                resp = await self.http_client.post(
-                    f"{settings.embedding_url}/mcp",
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "tools/call",
-                        "params": {
-                            "name": "generate_embedding",
-                            "arguments": {"text": text, "normalize": True, "use_cache": True}
-                        }
-                    },
-                    headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
-                    timeout=settings.embedding_mcp_timeout,
+                result = await self._embedding_client.call_tool(
+                    "generate_embedding",
+                    {"text": text, "normalize": True, "use_cache": True},
                 )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if "result" in data:
-                        content = data["result"].get("content", [])
-                        for item in content:
-                            if item.get("type") == "text":
-                                result = json.loads(item["text"])
-                                embedding = result.get("embedding")
-                                if embedding:
-                                    return embedding
+                embedding = result.get("embedding") if isinstance(result, dict) else None
+                if isinstance(embedding, list) and embedding:
+                    return embedding
+                log_search(
+                    "Embedding response missing vector",
+                    {"query": text[:80], "attempt": attempt},
+                )
             except Exception as e:
                 if attempt < attempts:
                     log_search(
@@ -760,6 +755,10 @@ class SearchEngine:
                             "error_type": e.__class__.__name__,
                         },
                     )
+                    # Reset MCP session and retry.
+                    if self._embedding_client is not None:
+                        self._embedding_client._initialized = False
+                        self._embedding_client._session_id = None
                 else:
                     log_error("SEARCH", f"Embedding fetch failed: {e}", e)
         return None
@@ -1298,6 +1297,8 @@ class SearchEngine:
         await self.http_client.aclose()
         if self._redis:
             await self._redis.close()
+        if self._embedding_client:
+            await self._embedding_client.close()
         await self.llm.close()
         # Mixtral DSL generator uses the same Redis, no separate cleanup needed
 
