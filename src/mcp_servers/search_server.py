@@ -552,7 +552,7 @@ class SearchEngine:
         try:
             # Generate DSL
             stage_start = perf_counter()
-            dsl = await self.generate_dsl(search_params)
+            dsl = await self.generate_dsl(search_params, use_semantic=use_semantic)
             timings["dsl_generation_ms"] = int((perf_counter() - stage_start) * 1000)
 
             # Execute search
@@ -566,7 +566,7 @@ class SearchEngine:
                 stage_start = perf_counter()
                 relaxed_params = dict(search_params)
                 relaxed_params["categories_fa"] = []
-                relaxed_dsl = await self.generate_dsl(relaxed_params)
+                relaxed_dsl = await self.generate_dsl(relaxed_params, use_semantic=use_semantic)
                 raw_results = await self._execute_search(relaxed_dsl)
                 timings["category_guard_retry_ms"] = int((perf_counter() - stage_start) * 1000)
                 log_search(
@@ -637,19 +637,45 @@ class SearchEngine:
             if use_cache and lock_key and lock_owner:
                 await self._release_cache_lock(lock_key, lock_owner)
 
-    async def generate_dsl(self, search_params: dict[str, Any]) -> dict:
+    async def generate_dsl(self, search_params: dict[str, Any], use_semantic: bool = True) -> dict:
         """
         Generate Elasticsearch DSL query.
         
         Strategy:
         1. Try Mixtral LLM-based DSL generation (10s timeout)
         2. If Mixtral fails or times out, fallback to rule-based DSL
-        3. If DSL contains embedding placeholder, inject real vector
+        3. If semantic is enabled, ensure DSL includes a knn section with query embedding
         """
         search_params = dict(search_params or {})
         search_params["categories_fa"] = self._sanitize_categories(
             search_params.get("categories_fa", []) or []
         )
+        semantic_query = search_params.get("product") or search_params.get("persian_full_query", "")
+
+        async def _ensure_knn(dsl_obj: dict) -> dict:
+            if not use_semantic or not isinstance(dsl_obj, dict):
+                return dsl_obj
+            if "knn" in dsl_obj:
+                return dsl_obj
+            if not semantic_query:
+                return dsl_obj
+            try:
+                embedding = await self._get_embedding(semantic_query)
+                if not embedding:
+                    log_search("Semantic KNN skipped (embedding unavailable)", {"query": semantic_query[:80]})
+                    return dsl_obj
+                dsl_copy = dict(dsl_obj)
+                dsl_copy["knn"] = {
+                    "field": "product_embedding",
+                    "query_vector": embedding,
+                    "k": settings.search_size,
+                    "num_candidates": max(settings.search_size * 4, 80),
+                }
+                log_search("Semantic KNN appended to DSL", {"query": semantic_query[:80], "k": settings.search_size})
+                return dsl_copy
+            except Exception as e:
+                log_error("SEARCH", f"Failed to append semantic KNN: {e}", e)
+                return dsl_obj
 
         # ── Try Mixtral first ──
         mixtral_start = perf_counter()
@@ -677,19 +703,21 @@ class SearchEngine:
             
             # Clean up any remaining internal markers
             mixtral_dsl.pop("_embedding_query", None)
-            return self._prune_dsl_category_filters(
+            guarded_dsl = self._prune_dsl_category_filters(
                 mixtral_dsl,
                 search_params.get("categories_fa", []),
             )
+            return await _ensure_knn(guarded_dsl)
 
         log_search("Mixtral DSL failed/timed out, using fallback", {"mixtral_ms": mixtral_ms})
 
         # ── Fallback: rule-based DSL ──
         fallback_dsl = self._generate_fallback_dsl(search_params)
-        return self._prune_dsl_category_filters(
+        guarded_fallback_dsl = self._prune_dsl_category_filters(
             fallback_dsl,
             search_params.get("categories_fa", []),
         )
+        return await _ensure_knn(guarded_fallback_dsl)
 
     async def _get_embedding(self, text: str) -> Optional[list[float]]:
         """Get embedding for text via the embedding MCP server."""
@@ -1347,7 +1375,7 @@ async def search_products(
     search_params: dict[str, Any],
     session_id: str,
     use_cache: bool = True,
-    use_semantic: bool = False,
+    use_semantic: bool = True,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """

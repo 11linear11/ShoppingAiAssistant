@@ -476,6 +476,7 @@ async def search_and_deliver(query: str) -> str:
             search_params=final_search_params,
             session_id=request_session_id,
             use_cache=not settings.debug_mode,
+            use_semantic=True,
         )
         timings["search_ms"] = int((perf_counter() - search_start) * 1000)
 

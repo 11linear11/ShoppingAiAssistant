@@ -366,7 +366,7 @@ class SearchMCPClient(MCPClient):
         search_params: dict[str, Any],
         session_id: str,
         use_cache: bool = True,
-        use_semantic: bool = False
+        use_semantic: bool = True
     ) -> dict[str, Any]:
         """
         Execute full search pipeline.
