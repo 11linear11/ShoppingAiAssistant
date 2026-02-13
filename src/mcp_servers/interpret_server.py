@@ -294,6 +294,16 @@ class QueryInterpreter:
                 {"original_query_type": query_type_str},
             )
             query_type_str = "unclear"
+        elif context.get("direct_unclear_only") and query_type_str == "direct":
+            if self._is_ambiguous_direct_product(llm_result, normalized):
+                log_interpret(
+                    "Coercing ambiguous direct product to unclear (direct_unclear_only mode)",
+                    {
+                        "original_product": llm_result.get("product"),
+                        "confidence": llm_result.get("confidence"),
+                    },
+                )
+                query_type_str = "unclear"
         log_interpret(
             f"Query type: {query_type_str}",
             {"reasoning": llm_result.get("reasoning", "")[:100]},
@@ -378,6 +388,46 @@ class QueryInterpreter:
         for ar, fa in replacements.items():
             text = text.replace(ar, fa)
         return re.sub(r"\s+", " ", text).strip()
+
+    def _is_ambiguous_direct_product(self, llm_result: dict, normalized_query: str) -> bool:
+        """
+        Detect obviously ambiguous direct products and force unclear fallback.
+        Active only when interpret is used as a direct retrieval gate.
+        """
+        product = self._normalize_persian(str(llm_result.get("product") or "")).lower().strip()
+        query = self._normalize_persian(str(normalized_query or "")).lower().strip()
+
+        if not product:
+            return True
+
+        generic_exact = {
+            "هدیه",
+            "کادو",
+            "gift",
+            "محصول",
+            "کالا",
+            "چیز",
+            "چیزی",
+            "یک چیز",
+            "یه چیز",
+            "مورد هدیه",
+            "مورد کادو",
+        }
+        if product in generic_exact:
+            return True
+
+        # Very short single-token products are usually ambiguous ("دست", ...)
+        if len(product) <= 2 and " " not in product:
+            return True
+
+        # Gift-like wording without a concrete product type should clarify first.
+        gift_terms = ("هدیه", "کادو", "gift")
+        if any(t in product for t in gift_terms) and len(product.split()) <= 2:
+            return True
+        if any(t in query for t in gift_terms) and product in {"هدیه", "کادو", "مورد هدیه"}:
+            return True
+
+        return False
 
     def _handle_number_selection(self, number: str, context: dict) -> dict[str, Any]:
         """Handle numeric selection (follow-up)."""
