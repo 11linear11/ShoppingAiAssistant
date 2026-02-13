@@ -28,6 +28,9 @@ from pydantic import Field
 from pydantic_settings import BaseSettings
 from sentence_transformers import SentenceTransformer
 
+import hashlib
+import redis.asyncio as aioredis
+
 # Add parent path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from src.pipeline_logger import (
@@ -71,6 +74,13 @@ class Settings(BaseSettings):
         default="intfloat/multilingual-e5-base",
         alias="EMBEDDING_MODEL",
     )
+
+    # Redis settings for embedding cache
+    redis_host: str = Field(default="127.0.0.1", alias="REDIS_HOST")
+    redis_port: int = Field(default=6379, alias="REDIS_PORT")
+    redis_password: str = Field(default="", alias="REDIS_PASSWORD")
+    redis_db: int = Field(default=0, alias="REDIS_DB")
+    cache_embedding_ttl: int = Field(default=604800, alias="CACHE_EMBEDDING_TTL")  # 7 days
 
     # Debug mode - disables caching
     debug_mode: bool = Field(default=False, alias="DEBUG_MODE")
@@ -161,6 +171,7 @@ class QueryInterpreter:
         self.llm = llm
         self._category_embeddings: dict[str, list[float]] = {}
         self._category_names: list[str] = []
+        self._embedding_cache_redis: Optional[aioredis.Redis] = None
         
         # Local embedding model for category matching
         log_interpret("Loading embedding model", {"model": settings.embedding_model})
@@ -169,6 +180,59 @@ class QueryInterpreter:
             device="cpu"
         )
         log_interpret("Embedding model loaded", {"model": settings.embedding_model})
+
+    async def _init_embedding_cache(self):
+        """Initialize Redis connection for embedding cache."""
+        if self._embedding_cache_redis is not None:
+            return
+        try:
+            self._embedding_cache_redis = aioredis.Redis(
+                host=settings.redis_host,
+                port=settings.redis_port,
+                password=settings.redis_password or None,
+                db=settings.redis_db,
+                decode_responses=True,
+            )
+            await self._embedding_cache_redis.ping()
+            log_interpret("Embedding cache connected to Redis", {
+                "host": settings.redis_host,
+                "port": settings.redis_port,
+            })
+        except Exception as e:
+            log_error("INTERPRET", f"Embedding cache Redis connection failed: {e}", e)
+            self._embedding_cache_redis = None
+
+    def _make_embedding_cache_key(self, text: str) -> str:
+        """Build a Redis key for embedding cache."""
+        text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        return f"cache:v1:embedding:{text_hash}"
+
+    async def _get_cached_embedding(self, text: str) -> Optional[list[float]]:
+        """Look up a cached embedding."""
+        if not self._embedding_cache_redis or settings.debug_mode:
+            return None
+        try:
+            key = self._make_embedding_cache_key(text)
+            val = await self._embedding_cache_redis.get(key)
+            if val:
+                return json.loads(val)
+        except Exception as e:
+            log_error("INTERPRET", f"Embedding cache GET failed: {e}", e)
+        return None
+
+    async def _store_embedding(self, text: str, embedding: list[float]) -> None:
+        """Store embedding in Redis cache."""
+        if not self._embedding_cache_redis or settings.debug_mode:
+            return
+        try:
+            key = self._make_embedding_cache_key(text)
+            await self._embedding_cache_redis.set(
+                key,
+                json.dumps(embedding),
+                ex=settings.cache_embedding_ttl,
+            )
+        except Exception as e:
+            log_error("INTERPRET", f"Embedding cache SET failed: {e}", e)
 
     async def load_category_embeddings(
         self, filepath: str = "full_category_embeddings.json"
@@ -554,20 +618,31 @@ If a product name is mentioned, it's DIRECT - not ABSTRACT.
         }
 
     async def _match_categories(self, product: str) -> list[str]:
-        """Match product to categories using embedding similarity."""
+        """Match product to categories using embedding similarity with caching."""
         if not self._category_embeddings:
             log_interpret("No category embeddings loaded", {})
             return []
 
         try:
-            # Generate embedding using local model (with E5 prefix)
+            # Check embedding cache first
             prefixed_text = f"query: {product}"
-            product_embedding = self._embedding_model.encode(
-                prefixed_text,
-                normalize_embeddings=True,
-                show_progress_bar=False,
-            )
-            product_vec = np.array(product_embedding)
+            cached_emb = await self._get_cached_embedding(prefixed_text)
+            
+            if cached_emb is not None:
+                product_vec = np.array(cached_emb)
+                log_interpret("Embedding cache HIT for category matching", {"product": product})
+            else:
+                # Generate embedding using local model (with E5 prefix)
+                product_embedding = self._embedding_model.encode(
+                    prefixed_text,
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                )
+                product_vec = np.array(product_embedding)
+                
+                # Store in cache
+                await self._store_embedding(prefixed_text, product_vec.tolist())
+                log_interpret("Embedding cache MISS, stored", {"product": product})
 
             similarities = []
             for cat_name, cat_embedding in self._category_embeddings.items():
@@ -628,6 +703,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
                 llm_client = LangChainLLM()
                 interpreter = QueryInterpreter(llm_client)
                 await interpreter.load_category_embeddings()
+                await interpreter._init_embedding_cache()
                 _shared_interpreter = interpreter
                 log_interpret("Interpret server started", {"model": settings.github_model})
                 if settings.debug_mode:

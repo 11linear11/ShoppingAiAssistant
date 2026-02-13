@@ -71,6 +71,12 @@ class Settings(BaseSettings):
         alias="GITHUB_MODEL",
     )
 
+    # Mixtral DSL generation via OpenRouter
+    openrouter_api_key: str = Field(default="", alias="OPEN_ROUTERS_API_KEY")
+    openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL")
+    mixtral_model: str = Field(default="mistralai/mixtral-8x7b-instruct", alias="MIXTRAL_MODEL")
+    mixtral_dsl_timeout: float = Field(default=10.0, alias="MIXTRAL_DSL_TIMEOUT")
+
     # Elasticsearch settings
     es_host: str = Field(default="localhost", alias="ELASTICSEARCH_HOST")
     es_port: int = Field(default=9200, alias="ELASTICSEARCH_PORT")
@@ -88,6 +94,7 @@ class Settings(BaseSettings):
     redis_password: str = Field(default="", alias="REDIS_PASSWORD")
     redis_db: int = Field(default=0, alias="REDIS_DB")
     cache_search_ttl: int = Field(default=3600, alias="CACHE_SEARCH_TTL")
+    cache_dsl_ttl: int = Field(default=3600, alias="CACHE_DSL_TTL")
 
     # Search settings
     search_timeout: int = Field(default=30, alias="SEARCH_TIMEOUT")
@@ -150,6 +157,235 @@ class LangChainLLM:
 
 
 # ============================================================================
+# Mixtral DSL Generator
+# ============================================================================
+
+# All known categories in the database
+KNOWN_CATEGORIES = [
+    "خانه و سبک زندگی", "آرایشی و بهداشتی", "تنقلات", "نوشیدنی",
+    "مد و پوشاک", "لوازم برقی و دیجیتال", "دستمال و شوینده",
+    "چاشنی و افزودنی", "لبنیات", "خواربار و نان",
+    "کنسرو و غذای آماده", "مواد پروتئینی", "خشکبار، دسر و شیرینی",
+    "کودک و نوزاد", "کالاهای اساسی", "شوینده و مواد ضد عفونی کننده",
+    "بهداشت و سلامت", "صبحانه", "طلا", "میوه و سبزیجات تازه",
+    "محصولات سلولزی", "کنسرو و غذاهای آماده", "خانه و آشپزخانه",
+    "دسر و شیرینی پزی", "آجیل و خشکبار", "لوازم تحریر و اداری",
+    "نان و شیرینی", "لوازم الکترونیکی",
+]
+
+MIXTRAL_DSL_SYSTEM_PROMPT = """You are an Elasticsearch DSL query generator for a Persian e-commerce product database.
+
+## Elasticsearch Index: shopping_products
+
+### Fields:
+1. **product_name** (text, searchable): Product name in Persian. Examples: "خامه نیم چرب هراز ۲۰۰ میلی لیتری", "بسته ۳ عددی پنیر سفید نیم چرب پگاه", "شامپو سر ضد شوره هد اند شولدرز"
+2. **brand_name** (text + keyword): Brand name in Persian. Examples: "هراز", "پگاه", "سامسونگ", "ال جی"
+3. **category_name** (text + keyword): Product category in Persian. Must be one of the known categories.
+4. **price** (float): Product price in Toman (Iranian currency). Range: ~10,000 to ~500,000,000
+5. **discount_price** (float): Discounted price. Same as price if no discount.
+6. **has_discount** (boolean): Whether product has a discount.
+7. **discount_percentage** (float): Discount percentage (0-100).
+8. **price_range** (keyword): "budget", "mid-range", "luxury", "premium"
+9. **product_id** (keyword): Unique product identifier.
+10. **product_embedding** (dense_vector, 768 dims): For semantic search. Use {{EMBEDDING_PLACEHOLDER}} as placeholder.
+
+### Sample Records:
+```json
+{"product_name": "خامه نیم چرب هراز ۲۰۰ میلی لیتری", "brand_name": "هراز", "price": 67900.0, "discount_price": 54320.0, "category_name": "لبنیات", "price_range": "budget", "has_discount": true, "discount_percentage": 20.0}
+{"product_name": "بسته ۳ عددی پنیر سفید نیم چرب حاوی ویتامین D۳ پگاه ۴۰۰ گرمی", "brand_name": "پگاه", "price": 232500.0, "category_name": "لبنیات", "price_range": "mid-range", "has_discount": false}
+{"product_name": "گوشی موبایل سامسونگ Galaxy A54", "brand_name": "سامسونگ", "price": 15500000.0, "category_name": "لوازم برقی و دیجیتال", "price_range": "luxury", "has_discount": true, "discount_percentage": 10.0}
+```
+
+### Known Categories:
+""" + ", ".join(KNOWN_CATEGORIES) + """
+
+## RULES:
+1. Return ONLY valid JSON (Elasticsearch DSL query). No explanation, no markdown.
+2. Use "multi_match" on product_name (boost ^3) and brand_name (boost ^2) for text search.
+3. Set fuzziness to "AUTO" for Persian text tolerance.
+4. If categories are provided, ONLY keep those with ≥70% relevance to the searched product. Remove irrelevant ones.
+5. If a brand is provided, add a "match" filter on brand_name.
+6. If price range is provided, add a "range" filter on price.
+7. For intent "find_cheapest", sort by price ASC then _score.
+8. For intent "find_best" or "find_high_quality", sort by _score then price ASC.
+9. Default sort: ["_score"].
+10. Always set "size" to the provided size value.
+11. If you want to include semantic/embedding search, add a "knn" section with field "product_embedding" and use the keyword {{EMBEDDING_PLACEHOLDER}} as the query_vector value. We will replace it with the real vector later.
+12. When categories are passed, evaluate each one: if it's clearly unrelated to the product being searched (less than 70% likely), REMOVE it. Only keep highly relevant categories.
+
+## Output Format:
+Return ONLY the JSON DSL query object. Example:
+{"query": {"bool": {"must": [...], "filter": [...]}}, "size": 50, "sort": [...]}
+"""
+
+
+class MixtralDSLGenerator:
+    """Generate Elasticsearch DSL using Mixtral 8x7B via OpenRouter."""
+
+    def __init__(self):
+        self._llm: Optional[ChatOpenAI] = None
+        self._dsl_cache_redis: Optional[aioredis.Redis] = None
+
+    async def init(self):
+        """Initialize the Mixtral client and DSL cache."""
+        if settings.openrouter_api_key:
+            self._llm = ChatOpenAI(
+                api_key=settings.openrouter_api_key,
+                base_url=settings.openrouter_base_url,
+                model=settings.mixtral_model,
+                temperature=0.05,
+                max_tokens=2000,
+            )
+            log_search("MixtralDSLGenerator initialized", {"model": settings.mixtral_model})
+        else:
+            log_search("MixtralDSLGenerator: No OpenRouter API key, will use fallback DSL only")
+
+    async def init_cache(self, redis_instance: Optional[aioredis.Redis]):
+        """Use the same Redis instance as the search engine for DSL cache."""
+        self._dsl_cache_redis = redis_instance
+
+    def _make_dsl_cache_key(self, params_str: str) -> str:
+        """Build cache key for DSL generation."""
+        key_hash = hashlib.md5(params_str.encode()).hexdigest()
+        return f"cache:v1:dsl:{key_hash}"
+
+    async def _get_cached_dsl(self, params_str: str) -> Optional[dict]:
+        """Check DSL cache."""
+        if not self._dsl_cache_redis or settings.debug_mode:
+            return None
+        try:
+            key = self._make_dsl_cache_key(params_str)
+            val = await self._dsl_cache_redis.get(key)
+            if val:
+                log_cache("DSL cache HIT", {"key": key})
+                return json.loads(val)
+        except Exception as e:
+            log_error("SEARCH", f"DSL cache GET failed: {e}", e)
+        return None
+
+    async def _store_dsl(self, params_str: str, dsl: dict) -> None:
+        """Store DSL in cache."""
+        if not self._dsl_cache_redis or settings.debug_mode:
+            return
+        try:
+            key = self._make_dsl_cache_key(params_str)
+            await self._dsl_cache_redis.set(
+                key,
+                json.dumps(dsl, ensure_ascii=False),
+                ex=settings.cache_dsl_ttl,
+            )
+            log_cache("DSL cache SET", {"key": key, "ttl": settings.cache_dsl_ttl})
+        except Exception as e:
+            log_error("SEARCH", f"DSL cache SET failed: {e}", e)
+
+    async def generate(self, search_params: dict[str, Any]) -> Optional[dict]:
+        """
+        Generate Elasticsearch DSL using Mixtral.
+        
+        Returns DSL dict on success, None on failure (caller should fallback).
+        Has a 10-second timeout.
+        """
+        if not self._llm:
+            return None
+
+        product = search_params.get("product") or search_params.get("persian_full_query", "")
+        intent = search_params.get("intent", "browse")
+        brand = search_params.get("brand")
+        categories = search_params.get("categories_fa", [])
+        price_range = search_params.get("constraints", {}).get("price_range") or search_params.get("price_range", {})
+        size = settings.search_size
+
+        # Build cache key from params
+        params_str = json.dumps({
+            "product": product,
+            "intent": intent,
+            "brand": brand,
+            "categories": sorted(categories) if categories else [],
+            "price_range": price_range,
+            "size": size,
+        }, sort_keys=True, ensure_ascii=False)
+
+        # Check DSL cache
+        cached_dsl = await self._get_cached_dsl(params_str)
+        if cached_dsl:
+            return cached_dsl
+
+        # Build prompt for Mixtral
+        prompt_parts = [f"Generate an Elasticsearch DSL query for the following search:\n"]
+        prompt_parts.append(f"Product: {product}")
+        prompt_parts.append(f"Intent: {intent}")
+        if brand:
+            prompt_parts.append(f"Brand: {brand}")
+        if categories:
+            prompt_parts.append(f"Categories (evaluate relevance, keep only ≥70% relevant): {', '.join(str(c) for c in categories)}")
+        if price_range:
+            if price_range.get("min"):
+                prompt_parts.append(f"Min price: {price_range['min']}")
+            if price_range.get("max"):
+                prompt_parts.append(f"Max price: {price_range['max']}")
+        prompt_parts.append(f"Size: {size}")
+        prompt_parts.append("\nReturn ONLY the JSON DSL query.")
+
+        prompt = "\n".join(prompt_parts)
+
+        try:
+            # 10-second timeout
+            response = await asyncio.wait_for(
+                self._llm.ainvoke([
+                    SystemMessage(content=MIXTRAL_DSL_SYSTEM_PROMPT),
+                    HumanMessage(content=prompt),
+                ]),
+                timeout=settings.mixtral_dsl_timeout,
+            )
+
+            raw_text = response.content.strip()
+            
+            # Extract JSON from response
+            json_match = re.search(r'\{[\s\S]*\}', raw_text)
+            if not json_match:
+                log_error("SEARCH", f"Mixtral DSL: no JSON found in response: {raw_text[:200]}")
+                return None
+
+            dsl = json.loads(json_match.group())
+
+            # Validate basic structure
+            if "query" not in dsl:
+                log_error("SEARCH", "Mixtral DSL: missing 'query' key")
+                return None
+
+            # Replace embedding placeholder with actual keyword marker
+            dsl_str = json.dumps(dsl, ensure_ascii=False)
+            if "{{EMBEDDING_PLACEHOLDER}}" in dsl_str:
+                # Mark that embedding should be injected later
+                dsl["_needs_embedding"] = True
+                dsl["_embedding_query"] = product
+
+            # Ensure size is set
+            if "size" not in dsl:
+                dsl["size"] = size
+
+            log_search("✅ Mixtral DSL generated successfully", {
+                "product": product,
+                "has_knn": "knn" in dsl or dsl.get("_needs_embedding", False),
+            })
+
+            # Cache the DSL
+            await self._store_dsl(params_str, dsl)
+
+            return dsl
+
+        except asyncio.TimeoutError:
+            log_error("SEARCH", f"Mixtral DSL generation timed out after {settings.mixtral_dsl_timeout}s")
+            return None
+        except json.JSONDecodeError as e:
+            log_error("SEARCH", f"Mixtral DSL: invalid JSON: {e}")
+            return None
+        except Exception as e:
+            log_error("SEARCH", f"Mixtral DSL generation failed: {e}", e)
+            return None
+
+
+# ============================================================================
 # Search Engine
 # ============================================================================
 
@@ -157,8 +393,9 @@ class LangChainLLM:
 class SearchEngine:
     """Unified search engine for e-commerce products."""
 
-    def __init__(self, llm_client: LangChainLLM):
+    def __init__(self, llm_client: LangChainLLM, mixtral_dsl: MixtralDSLGenerator):
         self.llm = llm_client
+        self.mixtral_dsl = mixtral_dsl
         self.http_client = httpx.AsyncClient(timeout=settings.search_timeout)
         self._brand_scores: dict[str, float] = {}
         self._redis: Optional[aioredis.Redis] = None
@@ -178,6 +415,8 @@ class SearchEngine:
                 "Search engine connected to Redis",
                 {"host": settings.redis_host, "port": settings.redis_port},
             )
+            # Share Redis with Mixtral DSL generator for DSL caching
+            await self.mixtral_dsl.init_cache(self._redis)
         except Exception as e:
             log_error("SEARCH", f"Redis connection failed (caching disabled): {e}", e)
             self._redis = None
@@ -369,7 +608,78 @@ class SearchEngine:
                 await self._release_cache_lock(lock_key, lock_owner)
 
     async def generate_dsl(self, search_params: dict[str, Any]) -> dict:
-        """Generate Elasticsearch DSL query."""
+        """
+        Generate Elasticsearch DSL query.
+        
+        Strategy:
+        1. Try Mixtral LLM-based DSL generation (10s timeout)
+        2. If Mixtral fails or times out, fallback to rule-based DSL
+        3. If DSL contains embedding placeholder, inject real vector
+        """
+        # ── Try Mixtral first ──
+        mixtral_start = perf_counter()
+        mixtral_dsl = await self.mixtral_dsl.generate(search_params)
+        mixtral_ms = int((perf_counter() - mixtral_start) * 1000)
+
+        if mixtral_dsl is not None:
+            log_search("Using Mixtral-generated DSL", {"took_ms": mixtral_ms})
+            
+            # Handle embedding placeholder injection
+            if mixtral_dsl.pop("_needs_embedding", False):
+                embedding_query = mixtral_dsl.pop("_embedding_query", "")
+                if embedding_query:
+                    try:
+                        embedding = await self._get_embedding(embedding_query)
+                        if embedding:
+                            # Replace placeholder in knn section
+                            dsl_str = json.dumps(mixtral_dsl, ensure_ascii=False)
+                            dsl_str = dsl_str.replace('"{{EMBEDDING_PLACEHOLDER}}"', json.dumps(embedding))
+                            mixtral_dsl = json.loads(dsl_str)
+                    except Exception as e:
+                        log_error("SEARCH", f"Embedding injection failed: {e}", e)
+                        # Remove knn section if embedding failed
+                        mixtral_dsl.pop("knn", None)
+            
+            # Clean up any remaining internal markers
+            mixtral_dsl.pop("_embedding_query", None)
+            return mixtral_dsl
+
+        log_search("Mixtral DSL failed/timed out, using fallback", {"mixtral_ms": mixtral_ms})
+
+        # ── Fallback: rule-based DSL ──
+        return self._generate_fallback_dsl(search_params)
+
+    async def _get_embedding(self, text: str) -> Optional[list[float]]:
+        """Get embedding for text via the embedding MCP server."""
+        try:
+            resp = await self.http_client.post(
+                f"{settings.embedding_url}/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "generate_embedding",
+                        "arguments": {"text": text, "normalize": True, "use_cache": True}
+                    }
+                },
+                headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
+                timeout=5.0,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if "result" in data:
+                    content = data["result"].get("content", [])
+                    for item in content:
+                        if item.get("type") == "text":
+                            result = json.loads(item["text"])
+                            return result.get("embedding")
+        except Exception as e:
+            log_error("SEARCH", f"Embedding fetch failed: {e}", e)
+        return None
+
+    def _generate_fallback_dsl(self, search_params: dict[str, Any]) -> dict:
+        """Generate fallback rule-based Elasticsearch DSL query."""
         search_query = search_params.get("product") or search_params.get("persian_full_query", "")
         intent = search_params.get("intent", "browse")
         brand = search_params.get("brand")
@@ -815,6 +1125,7 @@ class SearchEngine:
         if self._redis:
             await self._redis.close()
         await self.llm.close()
+        # Mixtral DSL generator uses the same Redis, no separate cleanup needed
 
 
 # ============================================================================
@@ -837,7 +1148,12 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         model=settings.github_model,
         base_url=settings.github_base_url,
     )
-    search_engine = SearchEngine(llm_client)
+    
+    # Initialize Mixtral DSL generator
+    mixtral_dsl = MixtralDSLGenerator()
+    await mixtral_dsl.init()
+    
+    search_engine = SearchEngine(llm_client, mixtral_dsl)
     await search_engine.load_brand_scores()
     await search_engine.init_redis()
 

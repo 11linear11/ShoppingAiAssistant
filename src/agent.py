@@ -190,104 +190,78 @@ async def _store_llm_response(key: str, response: str) -> bool:
 
 SYSTEM_PROMPT = """You are a friendly Persian shopping assistant. You help users find products.
 
+## YOUR ROLE:
+You are the conversational brain. You chat with users, understand their needs,
+make suggestions, and guide them towards finding the right product.
+You handle abstract, vague, and unclear requests YOURSELF — do NOT delegate them.
+
 ## CRITICAL RULES:
 
-### For Greetings and Casual Chat ONLY:
+### 1. Greetings and Casual Chat:
 - DO NOT use any tools for pure greetings/thanks/goodbyes
 - This ONLY applies to: سلام، خوبی، چطوری، ممنون، خداحافظ (with NO product or shopping intent)
 - Just respond naturally and warmly in Persian
 
-### For EVERYTHING ELSE (including abstract/vague requests):
-You MUST ALWAYS call `interpret_query` FIRST. NEVER skip this step. NEVER answer directly.
+### 2. Abstract / Vague Requests (handle YOURSELF, do NOT use tools):
+When user describes a feeling, mood, or vague need WITHOUT naming a specific product:
+- "خسته ام یه چیز خوب میخوام" → Chat with user, suggest product categories
+- "یه هدیه میخوام" → Ask who it's for, what occasion, budget
+- "یه چیز برای آرامش" → Suggest categories like tea, candles, etc.
+- "میخوام آروم بشم" → Suggest calming products
+- "یه چیز ارزون میخوام" → Ask what type of product
 
-Examples that MUST go to interpret_query:
-- "خسته ام یه چیز خوب میخوام" -> interpret_query("خسته ام یه چیز خوب میخوام")
-- "ارزان ترین شامپو" -> interpret_query("ارزان ترین شامپو")  
-- "یه هدیه میخوام" -> interpret_query("یه هدیه میخوام")
-- "کفش ورزشی مردانه" -> interpret_query("کفش ورزشی مردانه")
-- "یه چیز برای آرامش" -> interpret_query("یه چیز برای آرامش")
-- "بهترین لپتاپ" -> interpret_query("بهترین لپتاپ")
-- "میخوام آروم بشم" -> interpret_query("میخوام آروم بشم")
+For these, you MUST:
+1. Respond warmly in Persian
+2. Ask clarifying questions
+3. Suggest 3-5 specific product ideas with emojis
+4. Ask user to pick one or describe more
 
-## Tool Flow:
+Example response for "خسته ام":
+"می‌فهمم که خسته‌ای! 😊 بذار کمکت کنم. چه جور چیزی دنبال می‌گردی؟
+🍵 چای و دمنوش آرامش‌بخش
+🧴 ماساژور یا لوازم حمام
+🍫 شکلات و تنقلات انرژی‌زا
+📱 وسایل سرگرمی
+کدوم بیشتر به دردت میخوره؟ یا اگه چیز خاصی مد نظرته بگو 😄"
 
-### Step 1: interpret_query
-ALWAYS call this first for any non-greeting message. Pass the EXACT user message as-is.
+### 3. Follow-up References (handle YOURSELF):
+When user refers to previous conversation with pronouns or ordinals:
+- "اولی" → If you showed suggestions, treat user's choice as the product
+- "همون" → Reference previous context
+- "شماره ۳" → Pick from your previous suggestions
+After resolving the follow-up, if it maps to a specific product, call `search_and_deliver`.
 
-### Step 2: Read interpret_query result carefully
-The result JSON contains:
-- `query_type`: "direct", "abstract", "follow_up", or "unclear"
-- `searchable`: true or false
-- `search_params`: has `product`, `brand`, `intent`, `price_range`, `categories_fa`
-- `clarification`: for abstract/unclear queries, has question and suggestions
+### 4. Unclear / Too Short Messages (handle YOURSELF):
+- "اه" → Ask nicely what they need
+- "چی" → Ask them to describe what product they want
+- Single characters or meaningless text → Ask politely for more detail
 
-### Step 3: Act based on result
+### 5. Direct Product Requests (use `search_and_deliver` tool):
+When user clearly names a product or product type, call `search_and_deliver`:
+- "کفش ورزشی مردانه" → search_and_deliver("کفش ورزشی مردانه")
+- "ارزان ترین شامپو" → search_and_deliver("ارزان ترین شامپو")
+- "بهترین لپتاپ" → search_and_deliver("بهترین لپتاپ")
+- "گوشی سامسونگ زیر ۲۰ میلیون" → search_and_deliver("گوشی سامسونگ زیر ۲۰ میلیون")
+- "شکلات" → search_and_deliver("شکلات")
+- "پاستیل" → search_and_deliver("پاستیل")
 
-**If searchable=true (direct queries):**
-Call `search_products` with ALL parameters from interpret result:
-- product: from search_params.product
-- brand: from search_params.brand (only if not null)
-- min_price: from search_params.price_range.min (only if > 0)
-- max_price: from search_params.price_range.max (only if > 0)
-- intent: from search_params.intent EXACTLY as returned ("find_cheapest", "find_best", "browse", etc.)
-- categories_fa: from search_params.categories_fa (only if non-empty list)
+## Tool Usage:
+- `search_and_deliver(query)`: Pass the user's EXACT message when they want a specific product.
+  This tool handles interpretation, search, and returns formatted results directly.
+  The result is READY TO SHOW to the user — just return it as-is.
+- `get_product_details(product_id)`: Get details of a specific product.
 
-CRITICAL: Do NOT change or ignore the intent! If interpret says intent="find_cheapest", pass intent="find_cheapest" to search_products.
-
-**If searchable=false (abstract/unclear queries):**
-DO NOT call search_products.
-Use the clarification from interpret result.
-Present the suggestions in a friendly Persian message and ask user to pick one.
-
-## IMPORTANT for search_products:
-- Only pass parameters that have actual non-null values from interpret result
-- If brand is null, DO NOT pass brand parameter
-- If price_range is empty, DO NOT pass min_price or max_price
-- If categories_fa is empty or null, DO NOT pass categories_fa parameter
-- ALWAYS pass the intent value from interpret result
-- Never pass null values for optional parameters
-
-## CRITICAL: Presenting Search Results
-
-### Re-ranking and Filtering:
-After getting search results:
-1. **Filter irrelevant products**: Remove products that don't match
-2. **Re-rank by relevance**: Most relevant first
-3. **Show 5-10 products**
-
-### Formatting Results:
-Return response in this EXACT format:
-1. First line: Short Persian intro (e.g., "این محصولات رو پیدا کردم:")
-2. New line: JSON block in ```json ... ``` with products array
-
-JSON objects must have:
-- "name": string
-- "brand": string (empty if unknown)
-- "price": number (standard digits 0-9, NOT Persian digits)
-- "discount_price": number or null (standard digits)
-- "has_discount": boolean
-- "discount_percentage": number
-- "product_url": string
-
-Example:
-این محصولات رو پیدا کردم:
-```json
-[
-  {"name": "product name", "brand": "brand", "price": 12500000, "discount_price": 11000000, "has_discount": true, "discount_percentage": 12, "product_url": ""},
-  {"name": "product name 2", "brand": "brand", "price": 8500000, "discount_price": null, "has_discount": false, "discount_percentage": 0, "product_url": ""}
-]
-```
-
-### No Results:
-Say in Persian: "متأسفانه محصول مورد نظر شما یافت نشد. میتونید با کلمات دیگه جستجو کنید."
-
-IMPORTANT:
-- Do NOT format products with emojis or bullet points
-- ALWAYS use ```json code block format
-- Use standard digits (0-9) for numbers in JSON
+## CRITICAL: When search_and_deliver returns results:
+- If it starts with "🔍 SEARCH_RESULTS:", return the content EXACTLY as-is (remove the prefix).
+  Do NOT modify, re-rank, or re-format. The results are already optimized.
+- If it starts with "❓ NEED_CLARIFICATION:", the system detected the query is unclear.
+  Use the suggestions provided to chat with the user and help them clarify.
+- If it starts with "❌ NO_RESULTS:", tell the user no products were found and suggest alternatives.
 
 ## CACHED RESPONSE:
-If search_products returns a response starting with "✅ CACHED_RESPONSE:", that is a COMPLETE ready-to-send response from a previous identical search. You MUST return it EXACTLY as-is (without the "✅ CACHED_RESPONSE:" prefix). Do NOT modify, re-rank, re-format, or add anything. Just remove the prefix and return the rest verbatim.
+If search_and_deliver returns a response starting with "✅ CACHED_RESPONSE:", that is a COMPLETE 
+ready-to-send response from a previous identical search. Return it EXACTLY as-is 
+(without the "✅ CACHED_RESPONSE:" prefix). Do NOT modify.
 
 ## Response Language:
 - ALWAYS respond in Persian (Farsi)
@@ -326,98 +300,23 @@ def get_search_client() -> SearchMCPClient:
 
 
 @tool
-async def interpret_query(query: str) -> str:
+async def search_and_deliver(query: str) -> str:
     """
-    Interpret and analyze ANY user query that is not a simple greeting.
+    Interpret user query, search for products, and return formatted results.
     
-    MUST be called for ALL non-greeting messages, including:
-    - Direct product requests: "کفش ورزشی مردانه"
-    - Cheapest/best queries: "ارزان ترین شامپو"
-    - Abstract/vague requests: "خسته ام یه چیز خوب میخوام"
-    - Any message with shopping intent
+    This is the main tool for product searches. It handles the full pipeline:
+    1. Interprets the query (extract product, brand, intent, categories)
+    2. If query is unclear/not a product search, returns clarification
+    3. If searchable, executes search and returns formatted results
+    
+    ONLY call this when user clearly wants a specific product or product type.
+    Do NOT call for abstract/vague requests, greetings, or follow-ups.
     
     Args:
-        query: The EXACT user message, passed as-is without modification
+        query: The EXACT user message about a product they want
     
     Returns:
-        JSON with:
-        - searchable: true if this is a valid product search
-        - search_params: extracted parameters (product, brand, price_range, intent)
-    """
-    try:
-        tool_start = perf_counter()
-        current_trace = get_current_trace()
-        trace_id = current_trace.trace_id if current_trace else None
-        request_session_id = _get_active_session_id()
-
-        log_agent("interpret_query called", {
-            "query": query,
-            "session": request_session_id[:8],
-        })
-        
-        client = get_interpret_client()
-        mcp_call_start = perf_counter()
-        result = await client.interpret_query(
-            query=query,
-            session_id=request_session_id,
-            context={"trace_id": trace_id} if trace_id else {},
-        )
-        mcp_call_ms = int((perf_counter() - mcp_call_start) * 1000)
-        
-        log_agent("interpret_query result", {
-            "searchable": result.get("searchable"),
-            "query_type": result.get("query_type"),
-        })
-        log_latency_summary(
-            "AGENT",
-            "agent.tool.interpret_query",
-            int((perf_counter() - tool_start) * 1000),
-            breakdown_ms={"mcp_call_ms": mcp_call_ms},
-            meta={
-                "searchable": result.get("searchable"),
-                "query_type": result.get("query_type"),
-            },
-        )
-        
-        return json.dumps(result, ensure_ascii=False, indent=2)
-    except Exception as e:
-        log_latency_summary(
-            "AGENT",
-            "agent.tool.interpret_query",
-            int((perf_counter() - tool_start) * 1000),
-            meta={"success": False},
-        )
-        log_error("AGENT", f"interpret_query failed: {e}", e)
-        return json.dumps({"error": str(e), "searchable": False}, ensure_ascii=False)
-
-
-@tool
-async def search_products(
-    product: str,
-    brand: Optional[str] = None,
-    min_price: Optional[int] = None,
-    max_price: Optional[int] = None,
-    intent: str = "browse",
-    categories_fa: Optional[list[str]] = None,
-    limit: int = 10
-) -> str:
-    """
-    Search for products in the database.
-    
-    MUST only be called after interpret_query returns searchable=true.
-    Use the values from interpret_query's search_params to fill these parameters.
-    
-    Args:
-        product: Product name from interpret result's search_params.product (required)
-        brand: Brand from interpret result's search_params.brand (optional, skip if null)
-        min_price: From interpret result's search_params.price_range.min (optional, skip if null)
-        max_price: From interpret result's search_params.price_range.max (optional, skip if null)
-        intent: From interpret result's search_params.intent - MUST pass exactly as returned (e.g. "find_cheapest", "find_best", "browse"). This controls result sorting.
-        categories_fa: From interpret result's search_params.categories_fa - list of Persian category names (optional, skip if empty)
-        limit: Max results (default: 10)
-    
-    Returns:
-        JSON with search results
+        Formatted search results ready to show to user, OR clarification request
     """
     global _last_search_cache_key
     global _llm_cache_hit
@@ -430,138 +329,198 @@ async def search_products(
         trace_id = current_trace.trace_id if current_trace else None
         request_session_id = _get_active_session_id()
 
-        log_agent("search_products called", {
-            "product": product,
-            "brand": brand,
-            "min_price": min_price,
-            "max_price": max_price,
-            "intent": intent,
-            "categories_fa": categories_fa,
+        log_agent("search_and_deliver called", {
+            "query": query,
             "session": request_session_id[:8],
         })
-        
-        client = get_search_client()
-        
-        # Build search params - only include non-None values
-        search_params = {
+
+        # ── Step 1: Interpret the query ──
+        interpret_client = get_interpret_client()
+        interpret_start = perf_counter()
+        interpret_result = await interpret_client.interpret_query(
+            query=query,
+            session_id=request_session_id,
+            context={"trace_id": trace_id} if trace_id else {},
+        )
+        timings["interpret_ms"] = int((perf_counter() - interpret_start) * 1000)
+
+        query_type = interpret_result.get("query_type", "direct")
+        searchable = interpret_result.get("searchable", False)
+
+        log_agent("search_and_deliver interpret result", {
+            "query_type": query_type,
+            "searchable": searchable,
+            "product": interpret_result.get("search_params", {}).get("product"),
+        })
+
+        # ── Step 1.5: Interpret re-checks unclear ──
+        # If interpret says unclear, it means the agent sent a bad query.
+        # Return clarification back to the agent so it can chat with user.
+        if query_type == "unclear" or not searchable:
+            clarification = interpret_result.get("clarification", {})
+            question = clarification.get("question", "لطفاً دقیق‌تر بگید دنبال چه محصولی هستید؟")
+            suggestions = clarification.get("suggestions", [])
+            
+            suggestion_text = ""
+            if suggestions:
+                parts = []
+                for s in suggestions:
+                    if isinstance(s, dict):
+                        emoji = s.get("emoji", "🛒")
+                        product = s.get("product", "")
+                        parts.append(f"{emoji} {product}")
+                    else:
+                        parts.append(f"🛒 {s}")
+                suggestion_text = "\n".join(parts)
+            
+            log_agent("search_and_deliver returning clarification", {
+                "query_type": query_type,
+                "question": question,
+            })
+            log_latency_summary(
+                "AGENT",
+                "agent.tool.search_and_deliver",
+                int((perf_counter() - tool_start) * 1000),
+                breakdown_ms=timings,
+                meta={"result": "clarification", "query_type": query_type},
+            )
+            
+            return f"❓ NEED_CLARIFICATION:{question}\n{suggestion_text}"
+
+        # ── Step 2: Build search params ──
+        search_params = interpret_result.get("search_params", {})
+        product = search_params.get("product", query)
+        brand = search_params.get("brand")
+        intent = search_params.get("intent", "browse")
+        categories_fa = search_params.get("categories_fa", [])
+        price_range = search_params.get("price_range", {})
+
+        # Build params for search
+        final_search_params = {
             "product": product,
             "intent": intent,
-            "persian_full_query": product,
+            "persian_full_query": search_params.get("persian_full_query", product),
         }
-        
-        if brand and brand.strip():
-            search_params["brand"] = brand
-        
+
+        if brand and str(brand).strip():
+            final_search_params["brand"] = brand
+
         if categories_fa and len(categories_fa) > 0:
-            search_params["categories_fa"] = [c for c in categories_fa if c and c.strip()]
-        
-        if min_price is not None or max_price is not None:
-            search_params["price_range"] = {}
-            if min_price is not None and min_price > 0:
-                search_params["price_range"]["min"] = min_price
-            if max_price is not None and max_price > 0:
-                search_params["price_range"]["max"] = max_price
+            final_search_params["categories_fa"] = [c for c in categories_fa if c and str(c).strip()]
+
+        if price_range:
+            pr = {}
+            if price_range.get("min") and price_range["min"] > 0:
+                pr["min"] = price_range["min"]
+            if price_range.get("max") and price_range["max"] > 0:
+                pr["max"] = price_range["max"]
+            if pr:
+                final_search_params["price_range"] = pr
 
         if trace_id:
-            search_params["trace_id"] = trace_id
-        
-        # Track search key for post-LLM caching
-        _last_search_cache_key = _make_search_cache_key(search_params)
-        log_agent("search_products cache key", {
+            final_search_params["trace_id"] = trace_id
+
+        # Track search key for LLM response caching
+        _last_search_cache_key = _make_search_cache_key(final_search_params)
+        log_agent("search_and_deliver cache key", {
             "key": _last_search_cache_key,
-            "params_used": {k: v for k, v in search_params.items() if k != "persian_full_query"},
+            "params_used": {k: v for k, v in final_search_params.items() if k not in ("persian_full_query", "trace_id")},
         })
-        
-        # ── Level 3: Check if we have a cached LLM response for these search params ──
+
+        # ── Level 3: Check LLM response cache ──
         if not settings.debug_mode:
             cache_lookup_start = perf_counter()
             cached_llm = await _get_cached_llm_response(_last_search_cache_key)
             timings["llm_cache_lookup_ms"] = int((perf_counter() - cache_lookup_start) * 1000)
             if cached_llm:
-                log_agent("⚡ LLM response cache HIT inside search_products — returning cached LLM output", {
+                log_agent("⚡ LLM response cache HIT in search_and_deliver", {
                     "key": _last_search_cache_key,
                     "product": product,
-                    "cached_len": len(cached_llm),
                 })
-                # Set flag so chat() won't re-store the same response
                 _llm_cache_hit = True
                 _llm_cached_response = cached_llm
                 log_latency_summary(
                     "AGENT",
-                    "agent.tool.search_products",
+                    "agent.tool.search_and_deliver",
                     int((perf_counter() - tool_start) * 1000),
                     breakdown_ms=timings,
                     meta={"cache": "llm_hit", "product": product},
                 )
-                # Return the previous LLM-formatted response directly as tool output.
-                # The LLM will see this and pass it through as-is.
                 return f"✅ CACHED_RESPONSE:{cached_llm}"
         else:
             timings["llm_cache_lookup_ms"] = 0
-        
-        # ── Level 3 MISS: proceed with normal search ──
-        mcp_search_start = perf_counter()
-        result = await client.search_products(
-            search_params=search_params,
+
+        # ── Step 3: Execute search ──
+        search_client = get_search_client()
+        search_start = perf_counter()
+        result = await search_client.search_products(
+            search_params=final_search_params,
             session_id=request_session_id,
             use_cache=not settings.debug_mode,
         )
-        timings["mcp_search_ms"] = int((perf_counter() - mcp_search_start) * 1000)
-        
-        # Format results
-        formatted_results = []
-        for item in result.get("results", [])[:limit]:
-            formatted_results.append({
-                "id": item.get("id", item.get("product_id", "")),
+        timings["search_ms"] = int((perf_counter() - search_start) * 1000)
+
+        # ── Step 4: Format results for user ──
+        results = result.get("results", [])
+        if not results:
+            log_agent("search_and_deliver no results", {"product": product})
+            log_latency_summary(
+                "AGENT",
+                "agent.tool.search_and_deliver",
+                int((perf_counter() - tool_start) * 1000),
+                breakdown_ms=timings,
+                meta={"result": "no_results", "product": product},
+            )
+            _last_search_cache_key = None
+            return "❌ NO_RESULTS:متأسفانه محصول مورد نظر شما یافت نشد. میتونید با کلمات دیگه جستجو کنید."
+
+        # Format as ready-to-show response
+        formatted_products = []
+        for item in results[:10]:
+            formatted_products.append({
                 "name": item.get("product_name", ""),
                 "brand": item.get("brand_name", ""),
                 "price": item.get("price", 0),
                 "discount_price": item.get("discount_price"),
                 "has_discount": item.get("has_discount", False),
                 "discount_percentage": item.get("discount_percentage", 0),
-                "url": item.get("product_url", ""),
+                "product_url": item.get("product_url", ""),
             })
-        
-        output = {
-            "success": result.get("success", True),
-            "total_hits": result.get("total_hits", 0),
-            "results": formatted_results,
-            "took_ms": result.get("took_ms", 0),
-        }
-        
+
+        products_json = json.dumps(formatted_products, ensure_ascii=False, indent=2)
+        response_text = f"این محصولات رو پیدا کردم:\n```json\n{products_json}\n```"
+
+        log_agent("search_and_deliver success", {
+            "product": product,
+            "results_count": len(formatted_products),
+        })
         log_query_summary(
             query=product,
             query_type="search",
             product=product,
-            results_count=output["total_hits"],
+            results_count=result.get("total_hits", 0),
             from_cache=result.get("from_cache", False),
-            total_ms=output["took_ms"],
+            total_ms=result.get("took_ms", 0),
         )
         log_latency_summary(
             "AGENT",
-            "agent.tool.search_products",
+            "agent.tool.search_and_deliver",
             int((perf_counter() - tool_start) * 1000),
             breakdown_ms=timings,
             meta={
-                "cache": "llm_miss",
-                "search_cache": result.get("from_cache", False),
-                "results": output["total_hits"],
+                "result": "success",
                 "product": product,
+                "results": len(formatted_products),
+                "search_cache": result.get("from_cache", False),
             },
         )
-        
-        return json.dumps(output, ensure_ascii=False, indent=2)
-        
+
+        return f"🔍 SEARCH_RESULTS:{response_text}"
+
     except Exception as e:
         _last_search_cache_key = None
-        log_latency_summary(
-            "AGENT",
-            "agent.tool.search_products",
-            int((perf_counter() - tool_start) * 1000),
-            meta={"success": False, "product": product},
-        )
-        log_error("AGENT", f"search_products failed: {e}", e)
-        return json.dumps({"error": str(e), "success": False, "results": []}, ensure_ascii=False)
+        log_error("AGENT", f"search_and_deliver failed: {e}", e)
+        return json.dumps({"error": str(e), "success": False}, ensure_ascii=False)
 
 
 @tool
@@ -685,7 +644,7 @@ class ShoppingAgent:
             **llm_kwargs,
         )
         
-        self.tools = [interpret_query, search_products, get_product_details]
+        self.tools = [search_and_deliver, get_product_details]
         self.memory = MemorySaver()
         
         self.agent = create_react_agent(
@@ -762,6 +721,12 @@ class ShoppingAgent:
                             "llm_len": len(response),
                         })
                         response = _llm_cached_response
+
+                    # Clean up prefixes from search_and_deliver that the LLM might have kept
+                    for prefix in ("🔍 SEARCH_RESULTS:", "❓ NEED_CLARIFICATION:", "❌ NO_RESULTS:", "✅ CACHED_RESPONSE:"):
+                        if response.startswith(prefix):
+                            response = response[len(prefix):]
+                            break
 
                     # ── Store LLM response in cache (keyed by search params) ──
                     # Only store if this was NOT a cache hit (avoid re-storing same data)
