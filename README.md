@@ -1,57 +1,71 @@
 # Shopping AI Assistant V3
 
-Persian shopping assistant built with FastAPI, LangGraph, MCP servers, Redis caching, and Elasticsearch.
+Persian shopping assistant with an agent-first architecture:
+- FastAPI backend as API gateway
+- LangGraph ReAct agent for tool decision
+- MCP microservices for interpret/search/embedding
+- Redis multi-layer caching
+- Elasticsearch product retrieval
 
-## What This Project Does
-- Conversational Persian shopping assistant
-- Decides between normal chat, clarification, and product search
-- Uses tool-calling (`search_and_deliver`, `get_product_details`) for product results
-- Returns structured API responses for frontend rendering
-- Emits pipeline latency summaries for bottleneck analysis
+This README is the fast entry point. For full technical details, use `docs/README.md`.
 
-## High-Level Architecture
+## Architecture Snapshot
 ```mermaid
 flowchart LR
   U[User] --> FE[Frontend React/Vite]
   FE -->|POST /api/chat| BE[FastAPI Backend]
   BE --> AS[AgentService]
-  AS --> AG[ShoppingAgent LangGraph]
+  AS --> AG[ShoppingAgent ReAct]
 
-  AG -->|MCP tools/call| INTP[Interpret MCP :5004]
-  AG -->|MCP tools/call| SRCH[Search MCP :5002]
+  AG -->|search_and_deliver| INTP[Interpret MCP :5004]
+  AG -->|search_products/get_product| SRCH[Search MCP :5002]
   SRCH --> EMB[Embedding MCP :5003]
 
-  AS <-->|L2 Cache| REDIS[(Redis)]
-  AG <-->|L3 Cache| REDIS
-  SRCH <-->|L1 + DSL + Negative Cache| REDIS
+  AS <-->|L2 Agent Cache| R[(Redis)]
+  AG <-->|L3 LLM Response Cache| R
+  SRCH <-->|L1 Search/Negative/DSL Cache| R
+  INTP <-->|Embedding Cache| R
   SRCH --> ES[(Elasticsearch)]
 ```
 
-## Active Services
-- `frontend` -> `${FRONTEND_HOST_PORT:-3000}`
-- `backend` (FastAPI) -> `${BACKEND_HOST_PORT:-8080}`
-- `interpret` (MCP) -> `${MCP_INTERPRET_HOST_PORT:-5004}`
-- `search` (MCP) -> `${MCP_SEARCH_HOST_PORT:-5002}`
-- `embedding` (MCP) -> `${MCP_EMBEDDING_HOST_PORT:-5003}`
-- `redis` -> `${REDIS_HOST_PORT:-6379}`
+## Runtime Components
+- `backend/`: HTTP API (`/api/chat`, `/api/health`)
+- `src/agent.py`: prompt-driven routing + tool calling
+- `src/mcp_client.py`: JSON-RPC MCP client with session/retry handling
+- `src/mcp_servers/interpret_server.py`: `direct|unclear` classification + extraction
+- `src/mcp_servers/search_server.py`: DSL generation + ES search + rerank + cache
+- `src/mcp_servers/embedding_server.py`: embedding/similarity service
+- `src/pipeline_logger.py`: traceable structured latency logs
 
-## Core Runtime Flow
-1. Frontend calls `POST /api/chat`.
-2. Backend `AgentService` checks L2 agent cache.
-3. On miss, `ShoppingAgent` runs ReAct and decides tool usage.
-4. For product search, agent calls `search_and_deliver` tool:
-   - interpret (`direct | unclear`)
-   - search (+ rerank)
-   - format results JSON block
-5. `AgentService` extracts products, cleans response text, returns structured API payload.
-6. Cache layers are updated when applicable.
+## Core Request Paths
+1. **Chat/clarify path**
+- User message goes to agent.
+- Agent responds directly (no search tool), or asks clarification.
 
-## Caching Layers
-- **L1 Search Cache** (search server): query/result cache + negative cache + DSL cache
-- **L2 Agent Cache** (`AgentService`): full API response cache for repeated direct queries
-- **L3 LLM Response Cache** (`src/agent.py`): cached final formatted LLM text keyed by search params
+2. **Direct product search path**
+- Agent calls `search_and_deliver(query)`.
+- Tool calls interpret (`interpret_query`) -> if `direct`, calls search (`search_products`).
+- Search returns ranked products; agent returns final answer.
+- `AgentService` extracts structured products and returns API payload.
 
-## Quick Start (Local)
+3. **No-result path**
+- Search returns zero hits.
+- Tool returns clarification suggestions instead of raw failure.
+
+## Cache Layers
+- `L1` Search Cache (`search_server` Redis): search result cache + negative cache + DSL cache
+- `L2` Agent Response Cache (`AgentService` Redis): full response cache for repeated direct queries
+- `L3` LLM Response Cache (`src/agent.py` Redis): cached final formatted answer keyed by search params
+- Interpret embedding cache (`interpret_server` Redis): cached query embeddings used in category matching
+- Embedding service cache (`embedding_server` in-process): short-term embedding cache inside embedding service
+
+## Quick Start (Docker)
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+## Quick Start (Local processes)
 ```bash
 cp .env.example .env
 python3 -m pip install -r requirements.txt
@@ -59,40 +73,9 @@ python3 -m src.mcp_servers.run_servers
 python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8080 --reload
 ```
 
-## Quick Start (Docker)
-```bash
-docker compose up --build
-```
+## Logs and Latency Analysis
+Pipeline logs are in `logs/` and include compact `LATENCY_SUMMARY` events.
 
-Debug stack:
-```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
-```
-
-## Configuration Highlights
-- Agent model routing:
-  - `AGENT_MODEL_PROVIDER=openrouter|groq`
-  - `AGENT_MODEL=...`
-- Interpret/Search model (GitHub/OpenRouter override through env)
-- Redis/Elasticsearch endpoints
-- Pipeline logging controls:
-  - `DEBUG_LOG`
-  - `PIPELINE_LOG_TO_FILE`
-  - `PIPELINE_LOG_MAX_BYTES`
-  - `PIPELINE_LOG_BACKUP_COUNT`
-
-See full config details in:
-- `docs/en/OPERATIONS.md`
-- `docs/fa/OPERATIONS.md`
-
-## Observability and Latency Analysis
-Pipeline logs are written under `logs/`:
-- `pipeline-shopping-assistant-backend.log`
-- `pipeline-shopping-assistant-interpret.log`
-- `pipeline-shopping-assistant-search.log`
-- `pipeline-shopping-assistant-embedding.log`
-
-Useful commands:
 ```bash
 grep -h "LATENCY_SUMMARY" logs/pipeline-*.log
 python3 scripts/analyze_latency_logs.py --log-dir logs --top 30
@@ -101,25 +84,22 @@ python3 scripts/analyze_latency_logs.py --log-dir logs --component interpret.pip
 python3 scripts/analyze_latency_logs.py --log-dir logs --component search.pipeline
 ```
 
+## Service Ports (Default)
+- Frontend: `3000`
+- Backend: `8080` (or `8081` depending on `.env`)
+- Interpret MCP: `5004`
+- Search MCP: `5002`
+- Embedding MCP: `5003`
+- Redis host binding: `REDIS_HOST_PORT` (recommended `6380` in `.env.example`)
+
 ## Testing
 ```bash
 pytest -q
 ```
 
-Targeted quick checks:
+Focused regression checks:
 ```bash
-pytest -q tests/test_agent_service.py tests/test_agent_cache.py tests/test_pipeline_logger.py
-```
-
-## Rollback
-If a deployment causes issues:
-```bash
-git revert <commit_sha>
-```
-
-For cleanup snapshots restored by script:
-```bash
-bash scripts/restore_cleanup_backup.sh
+pytest -q tests/test_agent_service.py tests/test_agent_cache.py tests/test_mcp_client.py tests/test_pipeline_logger.py
 ```
 
 ## Documentation Map

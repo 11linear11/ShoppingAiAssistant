@@ -4,7 +4,8 @@
 آدرس پایه پیش‌فرض: `http://<host>:8080`
 
 ### ۱.۱ `POST /api/chat`
-بدنه درخواست (`ChatRequest`):
+
+درخواست (`ChatRequest`):
 ```json
 {
   "message": "گوشی سامسونگ زیر 20 میلیون میخوام",
@@ -12,7 +13,11 @@
 }
 ```
 
-بدنه پاسخ (`ChatResponse`):
+اعتبارسنجی:
+- `message`: اجباری، طول `1..1000`
+- `session_id`: اختیاری
+
+پاسخ (`ChatResponse`):
 ```json
 {
   "success": true,
@@ -40,7 +45,7 @@
     "cached_at": null,
     "latency_breakdown_ms": {
       "initialize_ms": 0,
-      "agent_cache_lookup_ms": 2,
+      "agent_cache_lookup_ms": 1,
       "agent_chat_ms": 1490,
       "extract_products_ms": 4,
       "clean_response_ms": 1,
@@ -53,50 +58,77 @@
 }
 ```
 
-#### توضیح `metadata`
-- `query_type`: در `AgentService` از شکل خروجی تشخیص داده می‌شود (`direct`, `unclear`, `chat`, `no_results`, `error`, ...)
-- `from_agent_cache`: نشانگر hit کش سطح ۲
-- `latency_breakdown_ms`: تایم هر مرحله
+مقادیر قابل مشاهده `query_type`:
+- `direct`
+- `unclear`
+- `chat`
+- `no_results`
+- `timeout`
+- `error`
+- `unknown`
 
 ### ۱.۲ `GET /api/health`
-سلامت کلی برای:
+وضعیت سلامت این بخش‌ها:
 - `agent`
 - `interpret_server`
 - `search_server`
 
 نکته:
-- سرویس‌های MCP معمولا `/health` ندارند و endpoint اصلی‌شان `/mcp` است؛ در backend پاسخ 404 قابل‌دسترسی به‌عنوان reachable در نظر گرفته می‌شود.
+- چون endpoint اصلی سرویس MCP برابر `/mcp` است، پاسخ `404` برای `/health` به‌عنوان reachable در نظر گرفته می‌شود.
 
 ### ۱.۳ `GET /api/`
-endpoint ساده برای وضعیت API.
+endpoint ساده اطلاعات سرویس.
 
-## ۲) سطح پروتکل MCP
-همه سرویس‌های MCP از endpoint زیر استفاده می‌کنند:
-- `POST /mcp` (JSON-RPC با `initialize` و `tools/call`)
+## ۲) قراردادهای داخلی ابزار ایجنت
 
-پیاده‌سازی کلاینت: `src/mcp_client.py`.
+### ۲.۱ ابزار `search_and_deliver(query)`
+خروجی‌های prefixed:
+- `🔍 SEARCH_RESULTS:<text-with-json-products>`
+- `✅ CACHED_RESPONSE:<formatted-text>`
+- `❓ NEED_CLARIFICATION:<question+suggestions>`
+- `❌ NO_RESULTS:<message>`
 
-## ۳) قرارداد Interpret MCP (`:5004`)
+### ۲.۲ ابزار `get_product_details(product_id)`
+متن JSON جزئیات محصول از Search MCP برمی‌گرداند.
 
-### ابزار `interpret_query(query, session_id, context)`
-قرارداد اصلی:
+## ۳) قرارداد ترنسپورت MCP
+همه سرویس‌های MCP از JSON-RPC روی این endpoint استفاده می‌کنند:
+- `POST /mcp`
+
+کلاینت این موارد را هندل می‌کند:
+- `initialize`
+- `tools/call`
+- session stateful/stateless
+- parsing پاسخ JSON و SSE
+
+پیاده‌سازی:
+- `src/mcp_client.py`
+
+## ۴) قرارداد Interpret MCP (`:5004`)
+
+### ۴.۱ `interpret_query(query, session_id, context)`
+نمونه حالت direct:
 ```json
 {
   "success": true,
-  "query_type": "direct|unclear",
+  "query_type": "direct",
   "searchable": true,
   "search_params": {
-    "intent": "browse|find_cheapest|find_best|compare",
-    "product": "...",
-    "brand": "...",
-    "persian_full_query": "...",
-    "categories_fa": ["..."],
+    "intent": "browse",
+    "product": "شورت مردانه",
+    "brand": null,
+    "persian_full_query": "شورت مردانه میخوام",
+    "categories_fa": ["مد و پوشاک"],
     "price_range": {"min": null, "max": null}
+  },
+  "session_update": {
+    "last_query": "شورت مردانه میخوام",
+    "last_product": "شورت مردانه"
   }
 }
 ```
 
-اگر `query_type=unclear`:
+نمونه حالت unclear:
 ```json
 {
   "success": true,
@@ -104,24 +136,26 @@ endpoint ساده برای وضعیت API.
   "searchable": false,
   "clarification": {
     "needed": true,
-    "question": "...",
-    "suggestions": [{"id": 1, "product": "...", "emoji": "🛒"}]
+    "question": "لطفاً دقیق‌تر بگید دنبال چه محصولی هستید؟",
+    "suggestions": [
+      {"id": 1, "product": "گوشی موبایل", "emoji": "🛒"}
+    ]
   }
 }
 ```
 
-### ابزارهای تکمیلی
+### ۴.۲ ابزارهای دیگر
 - `classify_query(query)`
 - `get_interpreter_info()`
 
-## ۴) قرارداد Search MCP (`:5002`)
+## ۵) قرارداد Search MCP (`:5002`)
 
-### ابزار `search_products(search_params, session_id, use_cache, use_semantic)`
-نمونه پاسخ:
+### ۵.۱ `search_products(search_params, session_id, use_cache, use_semantic)`
+نمونه:
 ```json
 {
   "success": true,
-  "query": "...",
+  "query": "شورت مردانه",
   "total_hits": 50,
   "results": [
     {
@@ -146,13 +180,13 @@ endpoint ساده برای وضعیت API.
 }
 ```
 
-### ابزارهای تکمیلی
+### ۵.۲ ابزارهای دیگر
 - `generate_dsl(search_params)`
 - `get_product(product_id)`
 - `rerank_results(results, preferences, intent)`
 - `get_search_info()`
 
-## ۵) قرارداد Embedding MCP (`:5003`)
+## ۶) قرارداد Embedding MCP (`:5003`)
 - `generate_embedding(text, normalize=true, use_cache=true)`
 - `generate_embeddings_batch(texts, normalize=true, use_cache=true)`
 - `calculate_similarity(text1, text2)`
@@ -160,23 +194,31 @@ endpoint ساده برای وضعیت API.
 - `clear_embedding_cache()`
 - `get_model_info()`
 
-## ۶) قرارداد ابزار داخلی ایجنت
-ابزارهای `ShoppingAgent`:
-- `search_and_deliver(query)` -> خروجی متن با prefixهای:
-  - `🔍 SEARCH_RESULTS:`
-  - `✅ CACHED_RESPONSE:`
-  - `❓ NEED_CLARIFICATION:`
-  - `❌ NO_RESULTS:`
-- `get_product_details(product_id)`
+## ۷) قرارداد خطا
 
-در `AgentService` این prefixها حذف و پاسخ API نرمال‌سازی می‌شود.
+خطای سطح backend:
+```json
+{
+  "success": false,
+  "response": "متأسفانه مشکلی پیش اومد. لطفاً دوباره تلاش کنید.",
+  "products": [],
+  "metadata": {
+    "query_type": "error",
+    "error_stage": "agent.chat",
+    "error_type": "RuntimeError"
+  }
+}
+```
 
-## ۷) الگوی خطا
-- خطای runtime در backend:
-  - `success=false`
-  - پیام فارسی امن
-  - `metadata.error_stage`, `metadata.error_type`
-- خطای ابزار MCP:
-  - `{"success": false, "error": "..."}`
-- خطاهای transport/session در MCP:
-  - با retry هندل می‌شوند
+خطای سطح MCP:
+```json
+{
+  "success": false,
+  "error": "..."
+}
+```
+
+## ۸) منبع حقیقت قراردادها
+- Schemaها: `backend/api/schemas.py`
+- رفتار endpoint: `backend/api/routes.py`
+- رفتار سرویس: `backend/services/agent_service.py`

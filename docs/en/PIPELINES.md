@@ -1,140 +1,166 @@
 # Pipelines (English)
 
-This document details runtime pipelines and where latency/accuracy risks usually appear.
+This document describes execution pipelines exactly as implemented in code.
 
-## 1. Primary Chat Pipeline
+## 1. API Chat Pipeline
 
 ```mermaid
 sequenceDiagram
   participant FE as Frontend
-  participant BE as Backend /api/chat
+  participant API as /api/chat
   participant AS as AgentService
   participant AG as ShoppingAgent
-  participant IN as Interpret MCP
-  participant SE as Search MCP
 
-  FE->>BE: POST /api/chat
-  BE->>AS: chat(message, session_id)
-  AS->>AS: L2 cache lookup
-  alt cache miss
-    AS->>AG: agent.chat()
-    AG->>AG: LLM decides mode
-    alt search path
-      AG->>IN: interpret_query
-      alt direct
-        AG->>SE: search_products
-        SE-->>AG: ranked results
-        AG-->>AS: response text (search output)
-      else unclear
-        IN-->>AG: clarification payload
-      end
-    else chat/clarify/details
-      AG-->>AS: conversational response
-    end
+  FE->>API: ChatRequest(message, session_id?)
+  API->>AS: chat(...)
+  AS->>AS: initialize + optional L2 cache lookup
+  alt L2 hit
+    AS-->>API: cached payload
+  else L2 miss
+    AS->>AG: chat(message, session_id)
+    AG-->>AS: response text
     AS->>AS: extract_products + clean_response + detect_query_type
     AS->>AS: optional L2 cache set
-  else cache hit
-    AS-->>BE: cached payload
+    AS-->>API: ChatResponse payload
   end
-  BE-->>FE: ChatResponse
+  API-->>FE: JSON
 ```
 
-## 2. `search_and_deliver` Internal Pipeline
-This is the core tool path in `src/agent.py`.
+Main implementation:
+- `backend/api/routes.py`
+- `backend/services/agent_service.py`
+
+## 2. Agent Turn Pipeline (`ShoppingAgent.chat`)
 
 ```mermaid
 flowchart TD
-  A[search_and_deliver(query)] --> B[Loop guard: MAX_SEARCH_TOOL_CALLS_PER_TURN]
-  B --> C[interpret_query]
-  C --> D{query_type direct? searchable?}
-  D -->|No| E[Return NEED_CLARIFICATION]
-  D -->|Yes| F[build final_search_params]
-  F --> G[L3 cache lookup]
-  G -->|Hit| H[Return CACHED_RESPONSE]
-  G -->|Miss| I[search_products]
-  I --> J{results empty?}
-  J -->|Yes| K[Return clarification with alternatives]
-  J -->|No| L[Format products as JSON block]
-  L --> M[Return SEARCH_RESULTS]
+  A[Input message + session_id] --> B[trace_query + LangGraph config]
+  B --> C[Reset per-turn trackers]
+  C --> D[agent.ainvoke]
+  D --> E[Extract last AI/Tool message text]
+  E --> F{L3 cache hit?}
+  F -->|yes| G[Use cached final text]
+  F -->|no| H[Use generated text]
+  G --> I[Strip tool prefixes]
+  H --> I
+  I --> J{Need L3 store?}
+  J -->|yes| K[Store final text in Redis]
+  J -->|no| L[Skip]
+  K --> M[Return text + session]
+  L --> M
 ```
 
-## 3. Interpret Pipeline (`interpret_server`)
-1. Normalize Persian text
-2. Single LLM call for classification + extraction
-3. Coerce result to strict `direct | unclear`
-4. If `direct`:
-   - build `search_params`
-   - category matching via embedding similarity
-5. If non-direct:
-   - return clarification object with suggestions
+Error/fallback branches:
+- Tool-use endpoint unavailable (`404` tool-use) -> fallback agent on Groq if configured.
+- Invalid tool call history -> retry with new `session_id`.
+- Other failures -> return `__AGENT_ERROR__:{...}` envelope.
 
-### Contract Shape
-- `query_type`: `direct | unclear`
-- `searchable`: `true | false`
-- `search_params` for direct
-- `clarification` for unclear
+Main implementation:
+- `src/agent.py`
 
-## 4. Search Pipeline (`search_server`)
-1. Sanitize incoming categories
-2. Negative-cache check
-3. Search-cache lookup (+ lock to reduce stampede)
-4. DSL generation:
-   - primary: Mixtral DSL generator via OpenRouter
-   - fallback: rule-based DSL
-   - optional KNN embedding injection
-5. Execute Elasticsearch query
-6. Optional category-guard retry when first query returns zero hits
-7. Rerank results by value + relevancy
-8. Cache successful results
+## 3. Tool Pipeline: `search_and_deliver`
 
-## 5. Rerank Pipeline
-Rerank combines:
-- ES score
-- lexical relevancy position score
-- brand score
-- normalized price utility
-- discount effect
+```mermaid
+flowchart TD
+  T0[search_and_deliver(query)] --> T1[Loop guard]
+  T1 --> T2[interpret_query via MCP]
+  T2 --> T3{direct and searchable?}
+  T3 -->|no| T4[Build NEED_CLARIFICATION response]
+  T3 -->|yes| T5[Build final_search_params]
+  T5 --> T6[L3 cache lookup by search params]
+  T6 -->|hit| T7[Return CACHED_RESPONSE prefix]
+  T6 -->|miss| T8[search_products via MCP]
+  T8 --> T9{results empty?}
+  T9 -->|yes| T10[Return NEED_CLARIFICATION with alternatives]
+  T9 -->|no| T11[Format product JSON block]
+  T11 --> T12[Return SEARCH_RESULTS prefix]
+```
 
-Intent-dependent ordering:
-- `find_cheapest`: relevancy first, then lower price
-- `find_high_quality`: relevancy + brand/score priority
-- default: descending `value_score`
+Notes:
+- This tool is declared `@tool(return_direct=True)`.
+- Prefixes are later cleaned by `AgentService`.
 
-## 6. Frontend Rendering Pipeline
-1. Receive backend `ChatResponse`
-2. Read `response` + `products`
-3. If products missing, parse JSON-like block from `response`
-4. Strip JSON block from display text
-5. Render message and product cards/list
+Main implementation:
+- `src/agent.py`
 
-## 7. Latency Telemetry Pipeline
-Every major stage emits `LATENCY_SUMMARY`.
+## 4. Interpret Pipeline
+
+```mermaid
+flowchart TD
+  I0[query] --> I1[Persian normalization]
+  I1 --> I2[LLM classify+extract]
+  I2 --> I3[repair/validation]
+  I3 --> I4{query_type == direct?}
+  I4 -->|yes| I5[category embedding match]
+  I5 --> I6[return direct + search_params]
+  I4 -->|no| I7[return unclear + clarification]
+```
+
+Current hard behavior:
+- Any non-direct signal is coerced to `unclear`.
+- Classification contract keys:
+  - `query_type`, `product`, `brand`, `price_range`, `intent`, `confidence`
+
+Main implementation:
+- `src/mcp_servers/interpret_server.py`
+
+## 5. Search Pipeline
+
+```mermaid
+flowchart TD
+  S0[search_params] --> S1[sanitize categories]
+  S1 --> S2[negative cache check]
+  S2 --> S3[search cache lookup + lock]
+  S3 -->|hit| S4[return cached results]
+  S3 -->|miss| S5[generate DSL]
+  S5 --> S6[execute ES query]
+  S6 --> S7{zero hits and categories?}
+  S7 -->|yes| S8[retry once without categories]
+  S7 -->|no| S9[continue]
+  S8 --> S9
+  S9 --> S10{still zero hits?}
+  S10 -->|yes| S11[negative cache set + return empty]
+  S10 -->|no| S12[rerank]
+  S12 --> S13[search cache set]
+  S13 --> S14[return top results]
+```
+
+DSL generation strategy:
+1. Mixtral via OpenRouter (`MIXTRAL_MODEL`)
+2. Rule-based fallback DSL
+3. Optional KNN append/injection using embedding MCP
+
+Main implementation:
+- `src/mcp_servers/search_server.py`
+
+## 6. Latency Instrumentation Pipeline
+
+Every major stage writes `LATENCY_SUMMARY` for analysis.
 
 ```mermaid
 flowchart LR
-  E1[agent.chat] --> A[logs/pipeline-*-backend.log]
-  E2[agent_service.chat] --> A
-  E3[mcp_client.initialize/call_tool] --> A
-  E4[interpret.pipeline] --> B[logs/pipeline-*-interpret.log]
-  E5[search.pipeline] --> C[logs/pipeline-*-search.log]
+  A1[agent_service.chat] --> L[Pipeline logs]
+  A2[agent.chat] --> L
+  A3[agent.tool.search_and_deliver] --> L
+  A4[mcp_client.initialize/call_tool] --> L
+  A5[interpret.pipeline] --> L
+  A6[search.pipeline] --> L
 ```
 
-## 8. Common Bottleneck Locations
-- `mcp_client.initialize`: first-call session init overhead
-- `interpret.pipeline.llm_classification_ms`: LLM classification latency
-- `mcp_client.call_tool` to interpret/search: network + server latency
-- `search.pipeline.es_search_ms`: ES query latency
+Tools:
+- `grep -h "LATENCY_SUMMARY" logs/pipeline-*.log`
+- `python3 scripts/analyze_latency_logs.py --log-dir logs --top 30`
 
-## 9. Practical Validation Commands
-```bash
-# full latency summaries
-grep -h "LATENCY_SUMMARY" logs/pipeline-*.log
+## 7. Common Bottleneck Positions
+- `mcp_client.initialize`: first call per service/session mode.
+- `interpret.pipeline.llm_classification_ms`: interpret LLM latency.
+- `mcp_client.call_tool.http_request_ms`: transport/server overhead.
+- `search.pipeline.es_search_ms`: Elasticsearch latency.
+- `search.pipeline.rerank_ms`: heavy result lists + scoring.
 
-# ranked bottlenecks
-python3 scripts/analyze_latency_logs.py --log-dir logs --top 30
-
-# component-level focus
-python3 scripts/analyze_latency_logs.py --log-dir logs --component agent.chat
-python3 scripts/analyze_latency_logs.py --log-dir logs --component interpret.pipeline
-python3 scripts/analyze_latency_logs.py --log-dir logs --component search.pipeline
-```
+## 8. Accuracy-Sensitive Pipeline Points
+- Agent mode selection in system prompt.
+- Interpret direct/unclear classification quality.
+- Category match quality in interpret (`_match_categories`).
+- DSL category filter quality and pruning in search.
+- Rerank scoring weights and intent sort behavior.

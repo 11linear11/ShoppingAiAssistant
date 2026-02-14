@@ -1,38 +1,34 @@
 # Documentation Index
 
-This folder contains the authoritative project documentation for both English and Persian readers.
+This folder is the authoritative technical documentation for the current runtime architecture.
 
-## Recommended Reading Order
-1. Architecture
-2. Pipelines
-3. API Contracts
-4. Operations
+## Reading Order
+1. `ARCHITECTURE.md`
+2. `PIPELINES.md`
+3. `API.md`
+4. `OPERATIONS.md`
 
 ## English
-- Architecture: `docs/en/ARCHITECTURE.md`
-- Pipelines: `docs/en/PIPELINES.md`
-- API: `docs/en/API.md`
-- Operations: `docs/en/OPERATIONS.md`
+- `docs/en/ARCHITECTURE.md`
+- `docs/en/PIPELINES.md`
+- `docs/en/API.md`
+- `docs/en/OPERATIONS.md`
 
 ## فارسی
-- معماری: `docs/fa/ARCHITECTURE.md`
-- پایپلاین‌ها: `docs/fa/PIPELINES.md`
-- API و قراردادها: `docs/fa/API.md`
-- عملیات و استقرار: `docs/fa/OPERATIONS.md`
+- `docs/fa/ARCHITECTURE.md`
+- `docs/fa/PIPELINES.md`
+- `docs/fa/API.md`
+- `docs/fa/OPERATIONS.md`
 
-## Scope Covered by These Docs
-- Backend gateway: `backend/`
+## Coverage
+- API gateway and schemas: `backend/main.py`, `backend/api/*`, `backend/services/agent_service.py`
 - Agent orchestration: `src/agent.py`
-- Agent response shaping/cache: `backend/services/agent_service.py`, `src/agent_cache.py`
-- MCP transport/client: `src/mcp_client.py`
-- MCP servers:
-  - `src/mcp_servers/interpret_server.py`
-  - `src/mcp_servers/search_server.py`
-  - `src/mcp_servers/embedding_server.py`
-- Pipeline telemetry: `src/pipeline_logger.py`
-- Deployment: `docker-compose.yml`, `docker-compose.dev.yml`
+- MCP transport: `src/mcp_client.py`
+- MCP services: `src/mcp_servers/*`
+- Caching: `src/agent_cache.py`, Redis paths in search/interpret/agent
+- Logging and telemetry: `src/pipeline_logger.py`, `src/logging_config.py`
+- Deployment and runtime wiring: `docker-compose.yml`, `docker-compose.dev.yml`, `.env.example`
 
-## Fast Navigation by Task
-- Need to understand full request flow? -> `ARCHITECTURE.md` + `PIPELINES.md`
-- Need request/response schemas and tool contracts? -> `API.md`
-- Need env/deploy/rollback/log analysis commands? -> `OPERATIONS.md`
+## Notes
+- The docs describe the **actual code paths in this repository**.
+- If behavior changes in code, update docs in the same PR.

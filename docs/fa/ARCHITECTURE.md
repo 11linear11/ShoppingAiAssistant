@@ -1,51 +1,48 @@
 # معماری سیستم (فارسی)
 
-## ۱) نمای کلی سیستم
-معماری پروژه **agent-first** است:
-- فرانت پیام کاربر را به بک‌اند می‌فرستد
-- `AgentService` مدیریت سشن/کش/ساخت پاسخ API را انجام می‌دهد
-- `ShoppingAgent` تصمیم می‌گیرد ابزار صدا زده شود یا خیر
-- سرورهای MCP وظایف interpret/search/embedding را اجرا می‌کنند
-- Redis و Elasticsearch لایه‌های داده و کارایی هستند
+## ۱) دامنه و سبک معماری
+این پروژه یک معماری **Agent-First با Tool-Calling** دارد.
 
+ویژگی‌های اصلی:
+- یک درگاه HTTP واحد با FastAPI
+- تصمیم‌گیری هر نوبت مکالمه توسط مدل ایجنت
+- اجرای ابزارها توسط سرویس‌های MCP روی `/mcp`
+- جستجوی محصول روی Elasticsearch با چند لایه کش
+- ثبت لاگ ساختاریافته برای تحلیل تاخیر
+
+## ۲) توپولوژی کلان
 ```mermaid
 flowchart LR
-  FE[Frontend] -->|HTTP| BE[FastAPI Backend]
+  U[کاربر] --> FE[فرانت‌اند]
+  FE -->|POST /api/chat| BE[بک‌اند FastAPI]
   BE --> AS[AgentService]
-  AS --> AG[ShoppingAgent\nLangGraph ReAct]
+  AS --> AG[ShoppingAgent ReAct]
 
-  AG -->|tools/call| IC[MCPClient]
-  IC --> INTP[Interpret Server]
-  IC --> SRCH[Search Server]
-  SRCH --> EMB[Embedding Server]
+  AG -->|search_and_deliver| INTP[Interpret MCP :5004]
+  AG -->|search_products/get_product| SRCH[Search MCP :5002]
+  SRCH --> EMB[Embedding MCP :5003]
 
-  AS <-->|L2 cache| REDIS[(Redis)]
-  AG <-->|L3 cache| REDIS
-  SRCH <-->|L1 + DSL + Negative cache| REDIS
+  AS <-->|کش L2| REDIS[(Redis)]
+  AG <-->|کش L3| REDIS
+  INTP <-->|کش embedding| REDIS
+  SRCH <-->|کش جستجو/منفی/DSL| REDIS
   SRCH --> ES[(Elasticsearch)]
 ```
 
-## ۲) اجزای Runtime
+## ۳) مسئولیت اجزا
 
-| لایه | فایل(ها) | مسئولیت |
+| جزء | فایل‌های اصلی | مسئولیت |
 |---|---|---|
-| درگاه API | `backend/main.py`, `backend/api/routes.py` | endpointها، lifespan، health check، CORS |
-| سرویس واسط | `backend/services/agent_service.py` | init ایجنت، timeout، کش سطح ۲، نرمال‌سازی پاسخ |
-| ایجنت | `src/agent.py` | ReAct، ابزارها، پرامپت، کش سطح ۳ |
-| ترنسپورت MCP | `src/mcp_client.py` | `initialize` + `tools/call` با مدیریت سشن و retry |
-| Interpret MCP | `src/mcp_servers/interpret_server.py` | طبقه‌بندی کوئری (`direct/unclear`) + استخراج پارامتر |
-| Search MCP | `src/mcp_servers/search_server.py` | تولید DSL، جستجو ES، rerank، category guard، کش |
-| Embedding MCP | `src/mcp_servers/embedding_server.py` | embedding و similarity |
-| تلماتری | `src/pipeline_logger.py` | trace context، لاگ مرحله‌ای، `LATENCY_SUMMARY` |
+| API Gateway | `backend/main.py`, `backend/api/routes.py` | endpointها، lifecycle، health، CORS |
+| Service Layer | `backend/services/agent_service.py` | init ایجنت، timeout، کش L2، نرمال‌سازی پاسخ |
+| Agent | `src/agent.py` | تصمیم‌گیری prompt-driven، tool-calling، حافظه، کش L3 |
+| MCP Client | `src/mcp_client.py` | initialize/retry/session + parse JSON/SSE |
+| Interpret MCP | `src/mcp_servers/interpret_server.py` | تشخیص `direct/unclear` + استخراج پارامتر |
+| Search MCP | `src/mcp_servers/search_server.py` | تولید DSL، جستجو ES، rerank، گارد category، کش |
+| Embedding MCP | `src/mcp_servers/embedding_server.py` | embedding/similarity + کش درون‌پردازه |
+| Telemetry | `src/pipeline_logger.py` | trace id، لاگ مرحله‌ای، `LATENCY_SUMMARY` |
 
-## ۳) توپولوژی تصمیم‌گیری
-در مسیر فعلی، تصمیم روتینگ گفتگو/جستجو توسط **مدل ایجنت** انجام می‌شود (prompt-driven).
-
-- مودهای پرامپت: chat / clarify / search / details
-- مسیر جستجو از ابزار `search_and_deliver` انجام می‌شود
-- interpret در معماری فعلی خروجی را به `direct | unclear` محدود می‌کند
-
-## ۴) جریان داده و کنترل
+## ۴) جریان کنترل End-to-End
 ```mermaid
 sequenceDiagram
   participant U as کاربر
@@ -60,64 +57,112 @@ sequenceDiagram
 
   U->>FE: پیام
   FE->>BE: POST /api/chat
-  BE->>AS: chat()
+  BE->>AS: chat(message, session_id)
   AS->>RD: بررسی کش L2
+
   alt L2 hit
     AS-->>BE: پاسخ کش‌شده
+    BE-->>FE: ChatResponse
   else L2 miss
     AS->>AG: agent.chat()
-    AG->>IN: interpret_query (داخل search_and_deliver)
-    alt direct
-      AG->>SE: search_products
-      SE->>RD: search/negative/dsl cache
-      SE->>ES: query
-      ES-->>SE: hits
-      SE-->>AG: ranked results
-    else unclear
-      IN-->>AG: clarification
+    AG->>AG: تصمیم مدل برای mode
+    alt SEARCH
+      AG->>IN: interpret_query
+      alt direct
+        AG->>SE: search_products
+        SE->>RD: بررسی کش‌ها
+        alt miss
+          SE->>ES: اجرای DSL
+          ES-->>SE: hits
+          SE->>SE: rerank
+          SE->>RD: cache set
+        end
+        SE-->>AG: نتایج رتبه‌بندی‌شده
+      else unclear
+        IN-->>AG: پاسخ clarification
+      end
+    else CHAT/CLARIFY/DETAILS
+      AG-->>AS: پاسخ متنی
     end
-    AG-->>AS: متن پاسخ
-    AS->>AS: extract_products + clean_response + detect_query_type
+    AS->>AS: extract products + clean text + detect type
     AS->>RD: ذخیره احتمالی L2
     AS-->>BE: پاسخ ساختاریافته
+    BE-->>FE: JSON
   end
-  BE-->>FE: JSON
 ```
 
-## ۵) معماری کش
+## ۵) مدل تصمیم ایجنت
+ایجنت دو ابزار دارد:
+- `search_and_deliver(query)`
+- `get_product_details(product_id)`
 
-| لایه کش | محل | الگوی کلید | داده کش‌شده |
-|---|---|---|---|
-| L1 Search | `search_server` (Redis) | `cache:v2:search:*` | خروجی رنک‌شده جستجو |
-| Negative Cache | `search_server` (Redis) | `cache:v2:negative:*` | کوئری‌هایی که نتیجه ندارند |
-| DSL Cache | `search_server` (Redis) | `cache:v1:dsl:*` | DSL تولیدشده |
-| L2 Agent Cache | `AgentService` (Redis) | `cache:v1:agent:*` | پاسخ کامل API |
-| L3 LLM Cache | `src/agent.py` (Redis) | `cache:v1:llm_response:*` | متن نهایی فرمت‌شده LLM |
-| Interpret Embedding Cache | `interpret_server` (Redis) | `cache:v1:embedding:*` | embedding کوئری برای category match |
-| Embedding Service Cache | `embedding_server` (memory) | کلید داخلی | embedding داخل همان پروسس |
+modeهای پرامپت:
+- `CHAT`
+- `CLARIFY`
+- `SEARCH`
+- `DETAILS`
 
-## ۶) گاردهای کیفیت در Search
-- نرمال‌سازی دسته‌ها با لیست دسته‌های معتبر
-- حذف فیلتر دسته نامعتبر از DSL در کد (نه فقط پرامپت)
-- یک retry بدون category وقتی اولین جستجو صفر نتیجه باشد
-- rerank با امتیاز relevancy برای کاهش نتایج بی‌ربط
+اما خروجی نهایی Interpret فعلاً فقط:
+- `direct`
+- `unclear`
 
-## ۷) سشن و حافظه گفتگو
-- حافظه گفتگو با `MemorySaver` در `ShoppingAgent`
-- `session_id` API به `thread_id` ایجنت نگاشت می‌شود
-- در خطای history/tool mismatch، ایجنت با سشن جدید retry می‌کند
+نتیجه:
+- حتی اگر ایجنت مسیر SEARCH را انتخاب کند، Interpret می‌تواند آن را `unclear` برگرداند.
 
-## ۸) پایداری و خطا
-- `MCPClient` برای init و خطاهای transport/session retry دارد
-- در حالت OpenRouter، fallback به Groq قابل فعال‌سازی است
-- API در خطا خروجی امن و ساختاریافته با `success=false` می‌دهد
+## ۶) معماری کش
+```mermaid
+flowchart TD
+  Q[پیام ورودی] --> L2{کش L2 Agent?}
+  L2 -->|hit| R1[بازگشت پاسخ کامل]
+  L2 -->|miss| AG[Agent + tools]
 
-## ۹) مانیتورینگ و لاگ
-- لاگ سرویس‌ها: `src/logging_config.py`
-- لاگ پایپلاین: `src/pipeline_logger.py`
-- رویدادهای `LATENCY_SUMMARY` برای اجزای اصلی مثل:
-  - `agent.chat`
-  - `agent_service.chat`
-  - `interpret.pipeline`
-  - `search.pipeline`
-  - `mcp_client.call_tool`
+  AG --> L3{کش L3 متن نهایی?}
+  L3 -->|hit| R2[بازگشت متن کش‌شده]
+  L3 -->|miss| S[Search pipeline]
+
+  S --> L1{کش L1 جستجو?}
+  L1 -->|hit| R3[بازگشت نتایج کش‌شده]
+  L1 -->|miss| ES[ES + rerank]
+```
+
+namespaceهای مهم:
+- `cache:v1:agent:*`
+- `cache:v1:llm_response:*`
+- `cache:v2:search:*`
+- `cache:v2:negative:*`
+- `cache:v1:dsl:*`
+- `cache:v1:embedding:*`
+
+## ۷) کنترل کیفیت نتایج در Search
+در `search_server`:
+- نرمال‌سازی categoryها با لیست معتبر
+- حذف فیلتر category نامعتبر از DSL در کد
+- یک retry بدون category در حالت صفر نتیجه
+- rerank با ترکیب score/relevancy/price/brand/discount
+
+## ۸) سشن و حافظه
+- حافظه مکالمه با `MemorySaver` در LangGraph
+- `session_id` API به `thread_id` نگاشت می‌شود
+- اگر history ابزار خراب شود، ایجنت با سشن جدید retry می‌کند
+
+## ۹) پایداری و fallback
+- `MCPClient` برای init/transport/session retry دارد
+- در OpenRouter، fallback به Groq قابل فعال‌سازی است
+- Backend خطا را به پاسخ امن با `success=false` تبدیل می‌کند
+
+## ۱۰) مدل لاگ و مانیتورینگ
+`src/pipeline_logger.py` برای هر trace لاگ ساختاریافته می‌نویسد.
+
+کامپوننت‌های کلیدی latency:
+- `agent_service.chat`
+- `agent.chat`
+- `agent.tool.search_and_deliver`
+- `mcp_client.initialize`
+- `mcp_client.call_tool`
+- `interpret.pipeline`
+- `search.pipeline`
+
+## ۱۱) محدودیت‌های شناخته‌شده (نسخه فعلی)
+- پاسخ نهایی هنوز بعد از tool output از مسیر LLM عبور می‌کند.
+- Interpret فقط `direct/unclear` را پشتیبانی می‌کند.
+- نام‌گذاری intent در بخش‌هایی از Search هنوز با خروجی `find_best` کاملاً یکسان نیست (برخی شاخه‌ها legacy هستند).
